@@ -1,0 +1,35 @@
+import { ColorSchema, Fonts, GalleryHomePageLayout, ImageGap, MenuIcon, PhotoLayout } from 'src/gallery-setting/entity/gallery-setting.entity';
+import { ProjectType, StorageType } from '../entities/project.entity';
+export declare class CreateProjectWithSettingDto {
+    title: string;
+    description?: string;
+    dateCompleted?: Date;
+    shootDate?: Date;
+    projectType: ProjectType;
+    addedProducts?: string[];
+    storageType?: StorageType;
+    timeline?: number;
+    photoSelection?: boolean;
+    downloadOriginalPhotos?: boolean;
+    watermark?: boolean;
+    showProduct?: boolean;
+    allowFeedback?: boolean;
+    requireCredentials?: boolean;
+    displayShareBtn?: boolean;
+    displayContactInfo?: boolean;
+    displayBusinessCard?: boolean;
+    displayTestimonials?: boolean;
+    requirePassword?: boolean;
+    password?: string;
+    projectHeader?: string;
+    projectDescription?: string;
+    primaryFonts?: Fonts;
+    secondaryFonts?: Fonts;
+    photoLayout?: PhotoLayout;
+    menuIcon?: MenuIcon;
+    imageGap?: ImageGap;
+    colorSchema?: ColorSchema;
+    coverPhoto?: string | null;
+    siteCover?: string | null;
+    galeryHomePageLayout: GalleryHomePageLayout;
+}
