@@ -1,19 +1,22 @@
+export enum ZipJobStatus {
+  PENDING = 'PENDING',
+  PROCESSING = 'PROCESSING',
+  COMPLETED = 'COMPLETED',
+  FAILED = 'FAILED'
+}
+
 export interface ZipJob {
   jobId: string;
+  userId: string;
   folderId: string;
   status: ZipJobStatus;
-  url?: string;
-  error?: string;
   progress: number;
   totalFiles: number;
   processedFiles: number;
-}
-
-export enum ZipJobStatus {
-  PENDING = 'pending',
-  PROCESSING = 'processing',
-  COMPLETED = 'completed',
-  FAILED = 'failed'
+  url?: string;
+  error?: string;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 export interface ZipRequest {
@@ -26,4 +29,11 @@ export interface ZipStatusResponse {
   progress: number;
   url?: string;
   error?: string;
+}
+
+export interface ZipFile {
+  fileId: string;
+  fileName: string;
+  filePath: string;
+  size: number;
 }

@@ -1,31 +1,36 @@
-import { IsArray, IsNotEmpty, IsString, ValidateNested } from 'class-validator';
-import { Type } from 'class-transformer';
+import { IsString, IsNotEmpty, IsArray, IsOptional } from 'class-validator';
 
-class ZipFile {
-  @IsString()
-  @IsNotEmpty()
-  fileName: string;
-
-  @IsString()
-  @IsNotEmpty()
-  downloadUrl: string;
-}
-
-export class ZipJobDto {
-  @IsString()
-  @IsNotEmpty()
-  jobId: string;
-
+export class CreateZipDto {
   @IsString()
   @IsNotEmpty()
   folderId: string;
 
-  @IsArray()
-  @ValidateNested({ each: true })
-  @Type(() => ZipFile)
-  files: ZipFile[];
-
   @IsString()
   @IsNotEmpty()
   userId: string;
+
+  @IsString()
+  @IsOptional()
+  zipName?: string;
+
+  @IsArray()
+  @IsString({ each: true })
+  @IsOptional()
+  fileIds?: string[];
+}
+
+export class ZipStatusDto {
+  @IsString()
+  @IsNotEmpty()
+  jobId: string;
+}
+
+export class ZipResponseDto {
+  jobId: string;
+  status: string;
+  progress: number;
+  totalFiles: number;
+  processedFiles: number;
+  url?: string;
+  error?: string;
 }

@@ -13,7 +13,7 @@ import {
   DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import archiver from 'archiver';
+import * as archiver from 'archiver';
 import { Readable } from 'stream';
 import { createWriteStream, readFileSync, unlinkSync } from 'fs';
 import axios from 'axios';
@@ -47,11 +47,14 @@ export class ZipService {
     const jobId = `zip_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
     const job: ZipJob = {
       jobId,
+      userId: data.userId,         // Added missing userId
       folderId: data.folderId,
       status: ZipJobStatus.PENDING,
       progress: 0,
       totalFiles: 0,
       processedFiles: 0,
+      createdAt: new Date(),       // Added missing createdAt
+      updatedAt: new Date(),       // Added missing updatedAt
     };
 
     await this.cacheManager.set(`zip:${jobId}`, JSON.stringify(job), this.ZIP_EXPIRY_HOURS * 3600);
