@@ -1,46 +1,21 @@
-import {
-  Controller,
-  Post,
-  Body,
-  Get,
-  Param,
-  HttpException,
-  HttpStatus,
-} from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { Controller, Post, Body, Res } from '@nestjs/common';
 import { ZipService } from './zip.service';
-import { ZipJob, ZipStatusResponse } from './interfaces/zip.interface';
-import { CreateZipDto, ZipResponseDto } from './dto/zip.dto';
+import { ZipRequestDto } from './dto/zip-request.dto';
+import { ApiTags, ApiOperation, ApiResponse, ApiBody } from '@nestjs/swagger';
+import { Response } from 'express';
 
-@ApiTags('zip')
+@ApiTags('Zip')
 @Controller('zip')
 export class ZipController {
   constructor(private readonly zipService: ZipService) { }
 
-  @Post('create')
-  @ApiOperation({ summary: 'Create a zip from folder files' })
-  @ApiResponse({
-    status: 201,
-    description: 'Job started successfully',
-    type: String
-  })
-  async createZip(@Body() createZipDto: CreateZipDto): Promise<{ jobId: string }> {
-    const jobId = await this.zipService.processZipRequest(createZipDto);
-    return { jobId };
-  }
-
-  @Get('status/:jobId')
-  @ApiOperation({ summary: 'Get zip creation job status' })
-  @ApiResponse({
-    status: 200,
-    description: 'Job status details',
-    type: ZipResponseDto  // Changed from ZipStatusResponse to ZipResponseDto
-  })
-  async getStatus(@Param('jobId') jobId: string): Promise<ZipJob> {
-    const status = await this.zipService.getJobStatus(jobId);
-    if (!status) {
-      throw new HttpException('Job not found', HttpStatus.NOT_FOUND);
-    }
-    return status;
+  @Post()
+  @ApiOperation({ summary: 'Create a zip from S3 folder contents' })
+  @ApiBody({ type: ZipRequestDto })
+  @ApiResponse({ status: 201, description: 'Zip created and uploaded successfully' })
+  @ApiResponse({ status: 400, description: 'Bad Request' })
+  @ApiResponse({ status: 500, description: 'Server Error' })
+  async createZip(@Body() dto: ZipRequestDto, @Res() res: Response) {
+    return this.zipService.archiveAndStreamZip(dto, res);
   }
 }
