@@ -7,7 +7,7 @@ const axios_1 = require("axios");
 const uuid_1 = require("uuid");
 const path = require("path");
 async function zipTask(params) {
-    const { fileUrls, zipFileName } = params;
+    const { fileUrls, zipFileName, jobId } = params;
     if (!fileUrls || fileUrls.length === 0) {
         throw new Error('No file URLs provided');
     }
@@ -25,8 +25,14 @@ async function zipTask(params) {
         let isFinalized = false;
         output.on('close', () => {
             if (!isFinalized) {
+                const stats = fs.statSync(tempPath);
                 console.log(`Archive created: ${tempPath} (${archive.pointer()} bytes)`);
-                resolve(tempPath);
+                resolve({
+                    filePath: tempPath,
+                    fileSize: stats.size,
+                    successCount: successCount,
+                    totalCount: fileUrls.length
+                });
             }
         });
         output.on('error', (err) => {
@@ -46,8 +52,8 @@ async function zipTask(params) {
             }
         });
         archive.pipe(output);
+        let successCount = 0;
         try {
-            let successCount = 0;
             for (let i = 0; i < fileUrls.length; i++) {
                 const fileUrl = fileUrls[i];
                 try {
@@ -57,14 +63,20 @@ async function zipTask(params) {
                         responseType: 'stream',
                         timeout: 30000,
                         maxContentLength: 100 * 1024 * 1024,
+                        headers: {
+                            'User-Agent': 'ZIP-Microservice/1.0'
+                        }
                     });
-                    let name = decodedUrl.split('/').pop() || `file-${(0, uuid_1.v4)()}`;
+                    let name = decodedUrl.split('/').pop()?.split('?')[0] || `file-${(0, uuid_1.v4)()}`;
                     name = name.replace(/\.(heic|mov)$/i, '.jpg');
                     const baseName = path.parse(name).name;
                     const extension = path.parse(name).ext;
                     name = `${baseName}_${i + 1}${extension}`;
                     archive.append(response.data, { name });
                     successCount++;
+                    if (jobId) {
+                        console.log(`Job ${jobId}: Processed ${successCount}/${fileUrls.length} files`);
+                    }
                 }
                 catch (err) {
                     console.error(`Failed to append ${fileUrl}:`, err.message);

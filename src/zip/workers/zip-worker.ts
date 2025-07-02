@@ -7,10 +7,18 @@ import * as path from 'path';
 interface ZipTaskParams {
   fileUrls: string[];
   zipFileName?: string;
+  jobId?: string;
 }
 
-export default async function zipTask(params: ZipTaskParams): Promise<string> {
-  const { fileUrls, zipFileName } = params;
+interface ZipResult {
+  filePath: string;
+  fileSize: number;
+  successCount: number;
+  totalCount: number;
+}
+
+export default async function zipTask(params: ZipTaskParams): Promise<ZipResult> {
+  const { fileUrls, zipFileName, jobId } = params;
 
   if (!fileUrls || fileUrls.length === 0) {
     throw new Error('No file URLs provided');
@@ -26,7 +34,6 @@ export default async function zipTask(params: ZipTaskParams): Promise<string> {
     }
 
     const tempPath = path.join(tempDir, fileName);
-
     const output = fs.createWriteStream(tempPath);
     const archive = archiver('zip', {
       zlib: { level: 9 }
@@ -36,8 +43,14 @@ export default async function zipTask(params: ZipTaskParams): Promise<string> {
 
     output.on('close', () => {
       if (!isFinalized) {
+        const stats = fs.statSync(tempPath);
         console.log(`Archive created: ${tempPath} (${archive.pointer()} bytes)`);
-        resolve(tempPath);
+        resolve({
+          filePath: tempPath,
+          fileSize: stats.size,
+          successCount: successCount,
+          totalCount: fileUrls.length
+        });
       }
     });
 
@@ -61,9 +74,9 @@ export default async function zipTask(params: ZipTaskParams): Promise<string> {
 
     archive.pipe(output);
 
-    try {
-      let successCount = 0;
+    let successCount = 0;
 
+    try {
       for (let i = 0; i < fileUrls.length; i++) {
         const fileUrl = fileUrls[i];
         try {
@@ -72,25 +85,32 @@ export default async function zipTask(params: ZipTaskParams): Promise<string> {
 
           const response = await axios.get(decodedUrl, {
             responseType: 'stream',
-            timeout: 30000, // 30 seconds timeout per file
-            maxContentLength: 100 * 1024 * 1024, // 100MB max file size
+            timeout: 30000,
+            maxContentLength: 100 * 1024 * 1024,
+            headers: {
+              'User-Agent': 'ZIP-Microservice/1.0'
+            }
           });
 
-          let name = decodedUrl.split('/').pop() || `file-${uuidv4()}`;
+          let name = decodedUrl.split('/').pop()?.split('?')[0] || `file-${uuidv4()}`;
 
           // Replace extensions as needed
           name = name.replace(/\.(heic|mov)$/i, '.jpg');
 
-          // Ensure unique filename in case of duplicates
+          // Ensure unique filename
           const baseName = path.parse(name).name;
           const extension = path.parse(name).ext;
           name = `${baseName}_${i + 1}${extension}`;
 
           archive.append(response.data, { name });
           successCount++;
+
+          // Log progress
+          if (jobId) {
+            console.log(`Job ${jobId}: Processed ${successCount}/${fileUrls.length} files`);
+          }
         } catch (err) {
           console.error(`Failed to append ${fileUrl}:`, err.message);
-          // Continue processing other files instead of failing completely
         }
       }
 
@@ -100,7 +120,6 @@ export default async function zipTask(params: ZipTaskParams): Promise<string> {
       }
 
       console.log(`Successfully processed ${successCount}/${fileUrls.length} files`);
-
       isFinalized = true;
       await archive.finalize();
 
