@@ -6,44 +6,83 @@ const fs = require("fs");
 const axios_1 = require("axios");
 const uuid_1 = require("uuid");
 const path = require("path");
-function zipTask({ fileUrls, zipFileName, }) {
+async function zipTask(params) {
+    const { fileUrls, zipFileName } = params;
+    if (!fileUrls || fileUrls.length === 0) {
+        throw new Error('No file URLs provided');
+    }
     return new Promise(async (resolve, reject) => {
         const fileName = zipFileName || `archive-${(0, uuid_1.v4)()}.zip`;
         const tempDir = path.resolve(__dirname, '../../tmp');
         if (!fs.existsSync(tempDir)) {
-            fs.mkdirSync(tempDir);
+            fs.mkdirSync(tempDir, { recursive: true });
         }
         const tempPath = path.join(tempDir, fileName);
         const output = fs.createWriteStream(tempPath);
-        const archive = archiver('zip', { zlib: { level: 9 } });
+        const archive = archiver('zip', {
+            zlib: { level: 9 }
+        });
+        let isFinalized = false;
         output.on('close', () => {
-            resolve(tempPath);
+            if (!isFinalized) {
+                console.log(`Archive created: ${tempPath} (${archive.pointer()} bytes)`);
+                resolve(tempPath);
+            }
         });
         output.on('error', (err) => {
+            console.error('Output stream error:', err);
             reject(err);
         });
         archive.on('error', (err) => {
+            console.error('Archive error:', err);
             reject(err);
+        });
+        archive.on('warning', (err) => {
+            if (err.code === 'ENOENT') {
+                console.warn('Archive warning:', err);
+            }
+            else {
+                reject(err);
+            }
         });
         archive.pipe(output);
         try {
-            for (const fileUrl of fileUrls) {
+            let successCount = 0;
+            for (let i = 0; i < fileUrls.length; i++) {
+                const fileUrl = fileUrls[i];
                 try {
                     const decodedUrl = decodeURIComponent(fileUrl);
-                    const response = await axios_1.default.get(decodedUrl, { responseType: 'stream' });
+                    console.log(`Processing file ${i + 1}/${fileUrls.length}: ${decodedUrl}`);
+                    const response = await axios_1.default.get(decodedUrl, {
+                        responseType: 'stream',
+                        timeout: 30000,
+                        maxContentLength: 100 * 1024 * 1024,
+                    });
                     let name = decodedUrl.split('/').pop() || `file-${(0, uuid_1.v4)()}`;
                     name = name.replace(/\.(heic|mov)$/i, '.jpg');
+                    const baseName = path.parse(name).name;
+                    const extension = path.parse(name).ext;
+                    name = `${baseName}_${i + 1}${extension}`;
                     archive.append(response.data, { name });
+                    successCount++;
                 }
                 catch (err) {
                     console.error(`Failed to append ${fileUrl}:`, err.message);
                 }
             }
+            if (successCount === 0) {
+                reject(new Error('No files were successfully processed'));
+                return;
+            }
+            console.log(`Successfully processed ${successCount}/${fileUrls.length} files`);
+            isFinalized = true;
             await archive.finalize();
         }
         catch (err) {
+            console.error('Error during archive creation:', err);
             reject(err);
         }
     });
 }
+module.exports = zipTask;
 //# sourceMappingURL=zip-worker.js.map
