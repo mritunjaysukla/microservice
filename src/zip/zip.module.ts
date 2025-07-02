@@ -1,7 +1,7 @@
-// src/zip/zip.module.ts
+import './workers/zip-worker';
 import { Module } from '@nestjs/common';
-import { ZipService } from './zip.service';
 import { ZipController } from './zip.controller';
+import { ZipService } from './zip.service';
 
 @Module({
   controllers: [ZipController],
