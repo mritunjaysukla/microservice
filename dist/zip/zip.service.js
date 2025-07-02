@@ -17,15 +17,18 @@ const piscina_1 = require("piscina");
 const path = require("path");
 const fs = require("fs");
 const uuid_1 = require("uuid");
-const archiver = require("archiver");
-const axios_1 = require("axios");
 let ZipService = ZipService_1 = class ZipService {
     constructor() {
         this.logger = new common_1.Logger(ZipService_1.name);
         this.JOB_PREFIX = 'zipjob:';
+        this.ACTIVE_JOBS_KEY = 'zip:active_jobs';
+        this.MAX_CONCURRENT_JOBS = 10;
+        this.ZIP_EXPIRY_HOURS = 6;
         this.redis = new ioredis_1.default({
             host: process.env.REDIS_HOST || 'localhost',
             port: parseInt(process.env.REDIS_PORT || '6379'),
+            retryStrategy: () => 100,
+            maxRetriesPerRequest: 3,
         });
     }
     onModuleInit() {
@@ -33,11 +36,14 @@ let ZipService = ZipService_1 = class ZipService {
         const tsWorkerPath = path.resolve(__dirname, './workers/zip-worker.ts');
         this.piscina = new piscina_1.Piscina({
             filename: fs.existsSync(workerPath) ? workerPath : tsWorkerPath,
-            maxThreads: 4,
-            minThreads: 1,
+            maxThreads: parseInt(process.env.ZIP_MAX_THREADS || '4'),
+            minThreads: parseInt(process.env.ZIP_MIN_THREADS || '1'),
+            idleTimeout: 60000,
+            maxQueue: 50,
             execArgv: fs.existsSync(workerPath) ? [] : ['-r', 'ts-node/register'],
         });
-        this.logger.log(`Worker initialized with path: ${fs.existsSync(workerPath) ? workerPath : tsWorkerPath}`);
+        this.logger.log(`Worker pool initialized: ${this.piscina.threads.length} threads`);
+        this.logger.log(`Using worker file: ${fs.existsSync(workerPath) ? workerPath : tsWorkerPath}`);
     }
     onModuleDestroy() {
         this.redis.disconnect();
@@ -45,72 +51,83 @@ let ZipService = ZipService_1 = class ZipService {
             this.piscina.destroy();
         }
     }
-    async archiveAndStreamZip(dto, res) {
-        const { fileUrls, zipFileName } = dto;
-        if (!fileUrls || fileUrls.length === 0) {
-            throw new Error('No file URLs provided');
-        }
-        res.setHeader('Content-Type', 'application/zip');
-        res.setHeader('Content-Disposition', `attachment; filename="${zipFileName || 'archive.zip'}"`);
-        const archive = archiver('zip');
-        archive.pipe(res);
-        try {
-            for (const fileUrl of fileUrls) {
-                try {
-                    const decodedUrl = decodeURIComponent(fileUrl);
-                    const response = await axios_1.default.get(decodedUrl, { responseType: 'stream' });
-                    let fileName = decodedUrl.split('/').pop() || `file-${(0, uuid_1.v4)()}`;
-                    fileName = fileName.replace(/\.(heic|mov)$/i, '.jpg');
-                    archive.append(response.data, { name: fileName });
-                }
-                catch (err) {
-                    this.logger.error(`Error fetching or appending file ${fileUrl}: ${err.message}`);
-                    continue;
-                }
-            }
-            await archive.finalize();
-        }
-        catch (err) {
-            this.logger.error('Error during zip archive creation', err);
-            if (!res.headersSent) {
-                res.status(500).send('Error creating ZIP archive');
-            }
-        }
-    }
     async createZipJob(dto) {
         if (!dto.fileUrls || dto.fileUrls.length === 0) {
-            throw new Error('No file URLs provided');
+            throw new common_1.HttpException('No file URLs provided', common_1.HttpStatus.BAD_REQUEST);
+        }
+        const activeJobs = await this.redis.scard(this.ACTIVE_JOBS_KEY);
+        if (activeJobs >= this.MAX_CONCURRENT_JOBS) {
+            throw new common_1.HttpException('Server is busy. Please try again later.', common_1.HttpStatus.SERVICE_UNAVAILABLE);
         }
         const jobId = `job-${(0, uuid_1.v4)()}`;
+        const now = Date.now();
+        const expiresAt = now + (this.ZIP_EXPIRY_HOURS * 60 * 60 * 1000);
         await this.redis.hmset(this.JOB_PREFIX + jobId, {
             status: 'pending',
-            zipFileName: dto.zipFileName || 'archive.zip',
+            zipFileName: dto.zipFileName || `archive-${Date.now()}.zip`,
             error: '',
             fileUrls: JSON.stringify(dto.fileUrls),
+            createdAt: now.toString(),
+            expiresAt: expiresAt.toString(),
+            fileCount: dto.fileUrls.length.toString(),
+            progress: '0',
         });
-        this.runZipJob(jobId, dto).catch((err) => {
-            this.logger.error(`Zip job ${jobId} failed`, err);
-            this.redis.hset(this.JOB_PREFIX + jobId, 'status', 'failed');
-            this.redis.hset(this.JOB_PREFIX + jobId, 'error', err.message);
+        await this.redis.sadd(this.ACTIVE_JOBS_KEY, jobId);
+        await this.redis.expire(this.JOB_PREFIX + jobId, this.ZIP_EXPIRY_HOURS * 3600);
+        this.processZipJob(jobId, dto).catch((err) => {
+            this.logger.error(`Zip job ${jobId} failed:`, err);
+            this.updateJobStatus(jobId, 'failed', err.message);
         });
         return jobId;
     }
-    async runZipJob(jobId, dto) {
+    async processZipJob(jobId, dto) {
         try {
-            await this.redis.hset(this.JOB_PREFIX + jobId, 'status', 'processing');
-            const tempFilePath = await this.piscina.run({
-                fileUrls: dto.fileUrls,
+            await this.updateJobStatus(jobId, 'processing');
+            const validUrls = await this.validatePresignedUrls(dto.fileUrls);
+            if (validUrls.length === 0) {
+                throw new Error('No valid presigned URLs found');
+            }
+            if (validUrls.length < dto.fileUrls.length) {
+                this.logger.warn(`${dto.fileUrls.length - validUrls.length} URLs were invalid and skipped`);
+            }
+            const result = await this.piscina.run({
+                fileUrls: validUrls,
                 zipFileName: dto.zipFileName,
+                jobId: jobId,
             });
-            await this.redis.hset(this.JOB_PREFIX + jobId, 'status', 'done');
-            await this.redis.hset(this.JOB_PREFIX + jobId, 'tempFilePath', tempFilePath);
+            await this.redis.hmset(this.JOB_PREFIX + jobId, {
+                status: 'completed',
+                tempFilePath: result.filePath,
+                fileSize: result.fileSize?.toString() || '0',
+                successCount: result.successCount?.toString() || '0',
+                completedAt: Date.now().toString(),
+            });
         }
         catch (error) {
-            this.logger.error(`Error in runZipJob for ${jobId}:`, error);
-            await this.redis.hset(this.JOB_PREFIX + jobId, 'status', 'failed');
-            await this.redis.hset(this.JOB_PREFIX + jobId, 'error', error.message);
+            await this.updateJobStatus(jobId, 'failed', error.message);
             throw error;
         }
+        finally {
+            await this.redis.srem(this.ACTIVE_JOBS_KEY, jobId);
+        }
+    }
+    async validatePresignedUrls(urls) {
+        const validUrls = [];
+        for (const url of urls) {
+            try {
+                const parsedUrl = new URL(decodeURIComponent(url));
+                if (parsedUrl.searchParams.size > 0) {
+                    validUrls.push(url);
+                }
+                else {
+                    this.logger.warn(`Invalid presigned URL format: ${url}`);
+                }
+            }
+            catch (err) {
+                this.logger.warn(`Invalid URL: ${url}`);
+            }
+        }
+        return validUrls;
     }
     async getJobStatus(jobId) {
         const jobKey = this.JOB_PREFIX + jobId;
@@ -118,42 +135,138 @@ let ZipService = ZipService_1 = class ZipService {
         if (!job || Object.keys(job).length === 0) {
             return { status: 'not_found' };
         }
-        if (job.status === 'done') {
-            return {
-                status: 'done',
-                downloadUrl: `/zip/job/download/${jobId}`,
-            };
+        const result = {
+            status: job.status,
+            fileCount: parseInt(job.fileCount || '0'),
+            createdAt: job.createdAt,
+            expiresAt: job.expiresAt,
+        };
+        switch (job.status) {
+            case 'pending':
+                result.message = 'Job is queued for processing';
+                break;
+            case 'processing':
+                result.message = 'Files are being zipped';
+                result.progress = `${job.progress || 0}% complete`;
+                break;
+            case 'completed':
+                result.downloadUrl = `/zip/download/${jobId}`;
+                result.fileSize = this.formatFileSize(parseInt(job.fileSize || '0'));
+                result.successCount = parseInt(job.successCount || '0');
+                break;
+            case 'failed':
+                result.error = job.error;
+                result.successCount = parseInt(job.successCount || '0');
+                result.partialSuccess = result.successCount > 0;
+                break;
         }
-        return { status: job.status, error: job.error || undefined };
+        return result;
     }
-    async downloadZip(jobId, res) {
+    async downloadZip(jobId, res, inline = false) {
         const jobKey = this.JOB_PREFIX + jobId;
         const job = await this.redis.hgetall(jobKey);
-        if (!job || job.status !== 'done' || !job.tempFilePath) {
-            res.status(404).send('Zip file not found or not ready');
-            return;
+        if (!job || job.status !== 'completed' || !job.tempFilePath) {
+            throw new common_1.HttpException('Zip file not found or not ready', common_1.HttpStatus.NOT_FOUND);
         }
         const filePath = job.tempFilePath;
         if (!fs.existsSync(filePath)) {
-            res.status(404).send('Zip file not found on disk');
-            return;
+            throw new common_1.HttpException('Zip file has expired. Please create a new job.', common_1.HttpStatus.GONE);
         }
+        const stats = fs.statSync(filePath);
+        const disposition = inline ? 'inline' : 'attachment';
         res.setHeader('Content-Type', 'application/zip');
-        res.setHeader('Content-Disposition', `attachment; filename="${job.zipFileName || 'archive.zip'}"`);
+        res.setHeader('Content-Length', stats.size.toString());
+        res.setHeader('Content-Disposition', `${disposition}; filename="${job.zipFileName || 'archive.zip'}"`);
+        res.setHeader('Cache-Control', 'no-cache');
         const readStream = fs.createReadStream(filePath);
+        readStream.on('error', (err) => {
+            this.logger.error('Error streaming zip file:', err);
+            if (!res.headersSent) {
+                res.status(500).send('Download error');
+            }
+        });
+        readStream.on('end', () => {
+            this.cleanupJob(jobId, filePath);
+        });
         readStream.pipe(res);
-        readStream.on('close', () => {
+    }
+    async listJobs(status, limit = 20) {
+        const pattern = this.JOB_PREFIX + '*';
+        const keys = await this.redis.keys(pattern);
+        const jobs = [];
+        for (const key of keys.slice(0, limit)) {
+            const job = await this.redis.hgetall(key);
+            if (!status || job.status === status) {
+                const jobId = key.replace(this.JOB_PREFIX, '');
+                jobs.push({
+                    jobId,
+                    status: job.status,
+                    createdAt: new Date(parseInt(job.createdAt || '0')).toISOString(),
+                    fileCount: parseInt(job.fileCount || '0'),
+                    zipFileName: job.zipFileName,
+                });
+            }
+        }
+        return {
+            jobs: jobs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+            total: jobs.length,
+        };
+    }
+    async cancelJob(jobId) {
+        const jobKey = this.JOB_PREFIX + jobId;
+        const job = await this.redis.hgetall(jobKey);
+        if (!job || Object.keys(job).length === 0) {
+            throw new common_1.HttpException('Job not found', common_1.HttpStatus.NOT_FOUND);
+        }
+        if (job.status === 'completed' || job.status === 'failed') {
+            throw new common_1.HttpException('Job cannot be cancelled (already completed or failed)', common_1.HttpStatus.CONFLICT);
+        }
+        await this.redis.hset(jobKey, 'status', 'cancelled');
+        await this.redis.srem(this.ACTIVE_JOBS_KEY, jobId);
+        return {
+            message: 'Job cancelled successfully',
+            jobId,
+        };
+    }
+    async getHealthStatus() {
+        const activeJobs = await this.redis.scard(this.ACTIVE_JOBS_KEY);
+        return {
+            status: 'healthy',
+            workers: {
+                active: this.piscina.threads.length,
+                total: this.piscina.options.maxThreads,
+                queue: this.piscina.queueSize,
+            },
+            redis: this.redis.status,
+            activeJobs,
+            uptime: process.uptime(),
+        };
+    }
+    async updateJobStatus(jobId, status, error) {
+        const updates = { status };
+        if (error)
+            updates.error = error;
+        await this.redis.hmset(this.JOB_PREFIX + jobId, updates);
+    }
+    async cleanupJob(jobId, filePath) {
+        if (filePath && fs.existsSync(filePath)) {
             fs.unlink(filePath, (err) => {
                 if (err)
                     this.logger.error(`Failed to delete temp file: ${filePath}`, err);
+                else
+                    this.logger.log(`Cleaned up temp file: ${filePath}`);
             });
-            this.redis.del(jobKey);
-        });
-        readStream.on('error', (err) => {
-            this.logger.error('Error streaming zip file', err);
-            if (!res.headersSent)
-                res.status(500).send('Download error');
-        });
+        }
+        await this.redis.del(this.JOB_PREFIX + jobId);
+        await this.redis.srem(this.ACTIVE_JOBS_KEY, jobId);
+    }
+    formatFileSize(bytes) {
+        if (bytes === 0)
+            return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
     }
 };
 exports.ZipService = ZipService;

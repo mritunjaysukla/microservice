@@ -1,17 +1,44 @@
+import { Response } from 'express';
 import { ZipService } from './zip.service';
 import { ZipRequestDto } from './dto/zip-request.dto';
-import { Response } from 'express';
 export declare class ZipController {
     private readonly zipService;
     constructor(zipService: ZipService);
-    createZip(dto: ZipRequestDto, res: Response): Promise<void>;
     createZipJob(dto: ZipRequestDto): Promise<{
         jobId: string;
+        message: string;
+        estimatedTime: string;
     }>;
-    getStatus(jobId: string): Promise<{
+    getJobStatus(jobId: string): Promise<{
         status: string;
         error?: string;
         downloadUrl?: string;
+        progress?: string;
+        fileSize?: string;
+        fileCount?: number;
+        successCount?: number;
+        createdAt?: string;
+        expiresAt?: string;
+        message?: string;
     }>;
-    downloadZip(jobId: string, res: Response): Promise<void>;
+    downloadZip(jobId: string, res: Response, inline?: boolean): Promise<void>;
+    listJobs(status?: string, limit?: number): Promise<{
+        jobs: any[];
+        total: number;
+    }>;
+    cancelJob(jobId: string): Promise<{
+        message: string;
+        jobId: string;
+    }>;
+    healthCheck(): Promise<{
+        status: string;
+        workers: {
+            active: number;
+            total: number;
+            queue: number;
+        };
+        redis: "wait" | "reconnecting" | "connecting" | "connect" | "ready" | "close" | "end";
+        activeJobs: number;
+        uptime: number;
+    }>;
 }
