@@ -124,6 +124,8 @@ export class ZipService implements OnModuleInit, OnModuleDestroy {
         this.logger.warn(`${dto.fileUrls.length - validUrls.length} URLs were invalid and skipped`);
       }
 
+
+
       // Execute zip creation in worker thread
       const result = await this.piscina.run({
         fileUrls: validUrls,
