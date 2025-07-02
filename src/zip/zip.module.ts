@@ -1,4 +1,4 @@
-import './workers/zip-worker';
+
 import { Module } from '@nestjs/common';
 import { ZipController } from './zip.controller';
 import { ZipService } from './zip.service';

@@ -27,17 +27,23 @@ let ZipService = ZipService_1 = class ZipService {
             host: process.env.REDIS_HOST || 'localhost',
             port: parseInt(process.env.REDIS_PORT || '6379'),
         });
-        this.piscina = new piscina_1.Piscina({
-            filename: path.resolve(__dirname, './workers/zip.worker.js'),
-            maxThreads: 4,
-            minThreads: 1,
-            execArgv: [],
-        });
     }
     onModuleInit() {
+        const workerPath = path.resolve(__dirname, './workers/zip-worker.js');
+        const tsWorkerPath = path.resolve(__dirname, './workers/zip-worker.ts');
+        this.piscina = new piscina_1.Piscina({
+            filename: fs.existsSync(workerPath) ? workerPath : tsWorkerPath,
+            maxThreads: 4,
+            minThreads: 1,
+            execArgv: fs.existsSync(workerPath) ? [] : ['-r', 'ts-node/register'],
+        });
+        this.logger.log(`Worker initialized with path: ${fs.existsSync(workerPath) ? workerPath : tsWorkerPath}`);
     }
     onModuleDestroy() {
         this.redis.disconnect();
+        if (this.piscina) {
+            this.piscina.destroy();
+        }
     }
     async archiveAndStreamZip(dto, res) {
         const { fileUrls, zipFileName } = dto;
@@ -90,13 +96,21 @@ let ZipService = ZipService_1 = class ZipService {
         return jobId;
     }
     async runZipJob(jobId, dto) {
-        await this.redis.hset(this.JOB_PREFIX + jobId, 'status', 'processing');
-        const tempFilePath = await this.piscina.run({
-            fileUrls: dto.fileUrls,
-            zipFileName: dto.zipFileName,
-        });
-        await this.redis.hset(this.JOB_PREFIX + jobId, 'status', 'done');
-        await this.redis.hset(this.JOB_PREFIX + jobId, 'tempFilePath', tempFilePath);
+        try {
+            await this.redis.hset(this.JOB_PREFIX + jobId, 'status', 'processing');
+            const tempFilePath = await this.piscina.run({
+                fileUrls: dto.fileUrls,
+                zipFileName: dto.zipFileName,
+            });
+            await this.redis.hset(this.JOB_PREFIX + jobId, 'status', 'done');
+            await this.redis.hset(this.JOB_PREFIX + jobId, 'tempFilePath', tempFilePath);
+        }
+        catch (error) {
+            this.logger.error(`Error in runZipJob for ${jobId}:`, error);
+            await this.redis.hset(this.JOB_PREFIX + jobId, 'status', 'failed');
+            await this.redis.hset(this.JOB_PREFIX + jobId, 'error', error.message);
+            throw error;
+        }
     }
     async getJobStatus(jobId) {
         const jobKey = this.JOB_PREFIX + jobId;
@@ -120,12 +134,19 @@ let ZipService = ZipService_1 = class ZipService {
             return;
         }
         const filePath = job.tempFilePath;
+        if (!fs.existsSync(filePath)) {
+            res.status(404).send('Zip file not found on disk');
+            return;
+        }
         res.setHeader('Content-Type', 'application/zip');
         res.setHeader('Content-Disposition', `attachment; filename="${job.zipFileName || 'archive.zip'}"`);
         const readStream = fs.createReadStream(filePath);
         readStream.pipe(res);
         readStream.on('close', () => {
-            fs.unlink(filePath, () => { });
+            fs.unlink(filePath, (err) => {
+                if (err)
+                    this.logger.error(`Failed to delete temp file: ${filePath}`, err);
+            });
             this.redis.del(jobKey);
         });
         readStream.on('error', (err) => {

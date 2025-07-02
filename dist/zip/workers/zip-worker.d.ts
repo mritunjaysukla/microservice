@@ -1,4 +1,6 @@
-export default function zipTask({ fileUrls, zipFileName, }: {
+interface ZipTaskParams {
     fileUrls: string[];
     zipFileName?: string;
-}): Promise<string>;
+}
+export default function zipTask(params: ZipTaskParams): Promise<string>;
+export {};

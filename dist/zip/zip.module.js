@@ -7,7 +7,6 @@ var __decorate = (this && this.__decorate) || function (decorators, target, key,
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ZipModule = void 0;
-require("./workers/zip-worker");
 const common_1 = require("@nestjs/common");
 const zip_controller_1 = require("./zip.controller");
 const zip_service_1 = require("./zip.service");

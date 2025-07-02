@@ -10,7 +10,7 @@ import { Response } from 'express';
 import { Piscina } from 'piscina';
 import * as path from 'path';
 import * as fs from 'fs';
-import { v4 as uuidv4 } from 'uuid';  // <-- Fix: Proper import here
+import { v4 as uuidv4 } from 'uuid';
 import * as archiver from 'archiver';
 import axios from 'axios';
 
@@ -27,21 +27,30 @@ export class ZipService implements OnModuleInit, OnModuleDestroy {
       host: process.env.REDIS_HOST || 'localhost',
       port: parseInt(process.env.REDIS_PORT || '6379'),
     });
-
-    this.piscina = new Piscina({
-      filename: path.resolve(__dirname, './workers/zip.worker.js'),
-      maxThreads: 4,
-      minThreads: 1,
-      execArgv: [],
-    });
   }
 
   onModuleInit() {
-    // You can setup scheduled cleanup here or via Cron service
+    // Initialize Piscina after module init to ensure proper path resolution
+    const workerPath = path.resolve(__dirname, './workers/zip-worker.js');
+
+    // Check if compiled worker exists, if not use TypeScript file
+    const tsWorkerPath = path.resolve(__dirname, './workers/zip-worker.ts');
+
+    this.piscina = new Piscina({
+      filename: fs.existsSync(workerPath) ? workerPath : tsWorkerPath,
+      maxThreads: 4,
+      minThreads: 1,
+      execArgv: fs.existsSync(workerPath) ? [] : ['-r', 'ts-node/register'],
+    });
+
+    this.logger.log(`Worker initialized with path: ${fs.existsSync(workerPath) ? workerPath : tsWorkerPath}`);
   }
 
   onModuleDestroy() {
     this.redis.disconnect();
+    if (this.piscina) {
+      this.piscina.destroy();
+    }
   }
 
   // ======================
@@ -113,15 +122,22 @@ export class ZipService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async runZipJob(jobId: string, dto: ZipRequestDto) {
-    await this.redis.hset(this.JOB_PREFIX + jobId, 'status', 'processing');
+    try {
+      await this.redis.hset(this.JOB_PREFIX + jobId, 'status', 'processing');
 
-    const tempFilePath: string = await this.piscina.run({
-      fileUrls: dto.fileUrls,
-      zipFileName: dto.zipFileName,
-    });
+      const tempFilePath: string = await this.piscina.run({
+        fileUrls: dto.fileUrls,
+        zipFileName: dto.zipFileName,
+      });
 
-    await this.redis.hset(this.JOB_PREFIX + jobId, 'status', 'done');
-    await this.redis.hset(this.JOB_PREFIX + jobId, 'tempFilePath', tempFilePath);
+      await this.redis.hset(this.JOB_PREFIX + jobId, 'status', 'done');
+      await this.redis.hset(this.JOB_PREFIX + jobId, 'tempFilePath', tempFilePath);
+    } catch (error) {
+      this.logger.error(`Error in runZipJob for ${jobId}:`, error);
+      await this.redis.hset(this.JOB_PREFIX + jobId, 'status', 'failed');
+      await this.redis.hset(this.JOB_PREFIX + jobId, 'error', error.message);
+      throw error;
+    }
   }
 
   async getJobStatus(jobId: string): Promise<{
@@ -157,6 +173,11 @@ export class ZipService implements OnModuleInit, OnModuleDestroy {
 
     const filePath = job.tempFilePath;
 
+    if (!fs.existsSync(filePath)) {
+      res.status(404).send('Zip file not found on disk');
+      return;
+    }
+
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="${job.zipFileName || 'archive.zip'}"`);
 
@@ -164,7 +185,10 @@ export class ZipService implements OnModuleInit, OnModuleDestroy {
     readStream.pipe(res);
 
     readStream.on('close', () => {
-      fs.unlink(filePath, () => { });
+      // Clean up temp file and Redis entry
+      fs.unlink(filePath, (err) => {
+        if (err) this.logger.error(`Failed to delete temp file: ${filePath}`, err);
+      });
       this.redis.del(jobKey);
     });
 
