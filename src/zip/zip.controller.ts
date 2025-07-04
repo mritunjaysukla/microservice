@@ -1,5 +1,3 @@
-<<<<<<< HEAD
-=======
 import { Controller, Post, Body, Res } from '@nestjs/common';
 import { ZipService } from './zip.service';
 import { ZipRequestDto } from './dto/zip-request.dto';
@@ -21,4 +19,3 @@ export class ZipController {
     return this.zipService.archiveAndStreamZip(dto, res);
   }
 }
->>>>>>> 433c548 (feat: Add Swagger documentation to zip controller)

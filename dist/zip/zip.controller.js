@@ -1,5 +1,3 @@
-<<<<<<< HEAD
-=======
 "use strict";
 var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
     var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
@@ -47,4 +45,3 @@ exports.ZipController = ZipController = __decorate([
     __metadata("design:paramtypes", [zip_service_1.ZipService])
 ], ZipController);
 //# sourceMappingURL=zip.controller.js.map
->>>>>>> 433c548 (feat: Add Swagger documentation to zip controller)
