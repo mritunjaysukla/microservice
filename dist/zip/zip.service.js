@@ -12,6 +12,7 @@ var ZipService_1;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ZipService = void 0;
 const common_1 = require("@nestjs/common");
+const client_s3_1 = require("@aws-sdk/client-s3");
 const ioredis_1 = require("ioredis");
 const piscina_1 = require("piscina");
 const path = require("path");
@@ -20,15 +21,20 @@ const uuid_1 = require("uuid");
 let ZipService = ZipService_1 = class ZipService {
     constructor() {
         this.logger = new common_1.Logger(ZipService_1.name);
-        this.JOB_PREFIX = 'zipjob:';
-        this.ACTIVE_JOBS_KEY = 'zip:active_jobs';
-        this.MAX_CONCURRENT_JOBS = 10;
-        this.ZIP_EXPIRY_HOURS = 6;
         this.redis = new ioredis_1.default({
             host: process.env.REDIS_HOST || 'localhost',
             port: parseInt(process.env.REDIS_PORT || '6379'),
             retryStrategy: () => 100,
             maxRetriesPerRequest: 3,
+        });
+        this.s3Client = new client_s3_1.S3Client({
+            region: process.env.S3_REGION || 'custom-region',
+            endpoint: process.env.S3_ENDPOINT,
+            forcePathStyle: true,
+            credentials: {
+                accessKeyId: process.env.S3_ACCESS_KEY,
+                secretAccessKey: process.env.S3_SECRET_KEY,
+            },
         });
     }
     onModuleInit() {
@@ -37,13 +43,12 @@ let ZipService = ZipService_1 = class ZipService {
         this.piscina = new piscina_1.Piscina({
             filename: fs.existsSync(workerPath) ? workerPath : tsWorkerPath,
             maxThreads: parseInt(process.env.ZIP_MAX_THREADS || '4'),
-            minThreads: parseInt(process.env.ZIP_MIN_THREADS || '1'),
+            minThreads: parseInt(process.env.ZIP_MIN_THREADS || '2'),
             idleTimeout: 60000,
             maxQueue: 50,
             execArgv: fs.existsSync(workerPath) ? [] : ['-r', 'ts-node/register'],
         });
         this.logger.log(`Worker pool initialized: ${this.piscina.threads.length} threads`);
-        this.logger.log(`Using worker file: ${fs.existsSync(workerPath) ? workerPath : tsWorkerPath}`);
     }
     onModuleDestroy() {
         this.redis.disconnect();
@@ -51,185 +56,109 @@ let ZipService = ZipService_1 = class ZipService {
             this.piscina.destroy();
         }
     }
-    async createZipJob(dto) {
-        if (!dto.fileUrls || dto.fileUrls.length === 0) {
-            throw new common_1.HttpException('No file URLs provided', common_1.HttpStatus.BAD_REQUEST);
+    async archiveAndStreamZip(dto, res) {
+        const { fileUrls, zipFileName } = dto;
+        if (!fileUrls || fileUrls.length === 0) {
+            throw new Error('No file URLs provided');
         }
-        const activeJobs = await this.redis.scard(this.ACTIVE_JOBS_KEY);
-        if (activeJobs >= this.MAX_CONCURRENT_JOBS) {
-            throw new common_1.HttpException('Server is busy. Please try again later.', common_1.HttpStatus.SERVICE_UNAVAILABLE);
+        const validUrls = this.validateUrls(fileUrls);
+        if (validUrls.length === 0) {
+            throw new Error('No valid URLs provided');
         }
-        const jobId = `job-${(0, uuid_1.v4)()}`;
-        const now = Date.now();
-        const expiresAt = now + (this.ZIP_EXPIRY_HOURS * 60 * 60 * 1000);
-        await this.redis.hmset(this.JOB_PREFIX + jobId, {
-            status: 'pending',
-            zipFileName: dto.zipFileName || `archive-${Date.now()}.zip`,
-            error: '',
-            fileUrls: JSON.stringify(dto.fileUrls),
-            createdAt: now.toString(),
-            expiresAt: expiresAt.toString(),
-            fileCount: dto.fileUrls.length.toString(),
-            progress: '0',
-        });
-        await this.redis.sadd(this.ACTIVE_JOBS_KEY, jobId);
-        await this.redis.expire(this.JOB_PREFIX + jobId, this.ZIP_EXPIRY_HOURS * 3600);
-        this.processZipJob(jobId, dto).catch((err) => {
-            this.logger.error(`Zip job ${jobId} failed:`, err);
-            this.updateJobStatus(jobId, 'failed', err.message);
-        });
-        return jobId;
-    }
-    async processZipJob(jobId, dto) {
+        const jobId = `stream-${(0, uuid_1.v4)()}`;
+        const finalZipName = zipFileName || 'archive.zip';
+        this.logger.log(`Starting streaming zip job ${jobId} for ${validUrls.length} files`);
+        res.setHeader('Content-Type', 'application/zip');
+        res.setHeader('Content-Disposition', `attachment; filename="${finalZipName}"`);
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Transfer-Encoding', 'chunked');
         try {
-            await this.updateJobStatus(jobId, 'processing');
-            const validUrls = await this.validatePresignedUrls(dto.fileUrls);
-            if (validUrls.length === 0) {
-                throw new Error('No valid presigned URLs found');
-            }
-            if (validUrls.length < dto.fileUrls.length) {
-                this.logger.warn(`${dto.fileUrls.length - validUrls.length} URLs were invalid and skipped`);
-            }
             const result = await this.piscina.run({
                 fileUrls: validUrls,
-                zipFileName: dto.zipFileName,
+                zipFileName: finalZipName,
                 jobId: jobId,
+                streaming: true,
+                batchSize: 3,
+                maxRetries: 2,
             });
-            await this.redis.hmset(this.JOB_PREFIX + jobId, {
-                status: 'completed',
-                tempFilePath: result.filePath,
-                fileSize: result.fileSize?.toString() || '0',
-                successCount: result.successCount?.toString() || '0',
-                completedAt: Date.now().toString(),
+            if (!result || !result.filePath || !fs.existsSync(result.filePath)) {
+                throw new Error('Worker failed to create zip file');
+            }
+            this.logger.log(`Zip created successfully: ${result.filePath} (${this.formatFileSize(result.fileSize)})`);
+            this.logger.log(`Processed ${result.successCount}/${validUrls.length} files successfully`);
+            const stats = fs.statSync(result.filePath);
+            res.setHeader('Content-Length', stats.size.toString());
+            const readStream = fs.createReadStream(result.filePath, {
+                highWaterMark: 64 * 1024
             });
+            readStream.on('error', (error) => {
+                this.logger.error(`Stream error for job ${jobId}:`, error);
+                if (!res.headersSent) {
+                    res.status(500).send('Error streaming zip file');
+                }
+                this.cleanupTempFile(result.filePath);
+            });
+            readStream.on('end', () => {
+                this.logger.log(`Streaming completed for job ${jobId}`);
+                this.cleanupTempFile(result.filePath);
+            });
+            readStream.pipe(res);
         }
         catch (error) {
-            await this.updateJobStatus(jobId, 'failed', error.message);
-            throw error;
-        }
-        finally {
-            await this.redis.srem(this.ACTIVE_JOBS_KEY, jobId);
+            this.logger.error(`Error during zip creation for job ${jobId}:`, error);
+            if (!res.headersSent) {
+                res.status(500).json({
+                    error: 'Failed to create zip file',
+                    message: error.message,
+                    jobId: jobId
+                });
+            }
+            else {
+                res.end();
+            }
         }
     }
-    async validatePresignedUrls(urls) {
+    validateUrls(urls) {
         const validUrls = [];
         for (const url of urls) {
             try {
-                const parsedUrl = new URL(decodeURIComponent(url));
-                if (parsedUrl.searchParams.size > 0) {
+                const decodedUrl = decodeURIComponent(url);
+                const parsedUrl = new URL(decodedUrl);
+                if (parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:') {
                     validUrls.push(url);
                 }
                 else {
-                    this.logger.warn(`Invalid presigned URL format: ${url}`);
+                    this.logger.warn(`Invalid protocol for URL: ${url}`);
                 }
             }
-            catch (err) {
-                this.logger.warn(`Invalid URL: ${url}`);
+            catch (error) {
+                this.logger.warn(`Invalid URL format: ${url}`, error.message);
             }
         }
+        this.logger.log(`Validated ${validUrls.length}/${urls.length} URLs`);
         return validUrls;
     }
-    async getJobStatus(jobId) {
-        const jobKey = this.JOB_PREFIX + jobId;
-        const job = await this.redis.hgetall(jobKey);
-        if (!job || Object.keys(job).length === 0) {
-            return { status: 'not_found' };
+    cleanupTempFile(filePath) {
+        if (filePath && fs.existsSync(filePath)) {
+            fs.unlink(filePath, (err) => {
+                if (err) {
+                    this.logger.error(`Failed to delete temp file: ${filePath}`, err);
+                }
+                else {
+                    this.logger.log(`Cleaned up temp file: ${filePath}`);
+                }
+            });
         }
-        const result = {
-            status: job.status,
-            fileCount: parseInt(job.fileCount || '0'),
-            createdAt: job.createdAt,
-            expiresAt: job.expiresAt,
-        };
-        switch (job.status) {
-            case 'pending':
-                result.message = 'Job is queued for processing';
-                break;
-            case 'processing':
-                result.message = 'Files are being zipped';
-                result.progress = `${job.progress || 0}% complete`;
-                break;
-            case 'completed':
-                result.downloadUrl = `/zip/download/${jobId}`;
-                result.fileSize = this.formatFileSize(parseInt(job.fileSize || '0'));
-                result.successCount = parseInt(job.successCount || '0');
-                break;
-            case 'failed':
-                result.error = job.error;
-                result.successCount = parseInt(job.successCount || '0');
-                result.partialSuccess = result.successCount > 0;
-                break;
-        }
-        return result;
     }
-    async downloadZip(jobId, res, inline = false) {
-        const jobKey = this.JOB_PREFIX + jobId;
-        const job = await this.redis.hgetall(jobKey);
-        if (!job || job.status !== 'completed' || !job.tempFilePath) {
-            throw new common_1.HttpException('Zip file not found or not ready', common_1.HttpStatus.NOT_FOUND);
-        }
-        const filePath = job.tempFilePath;
-        if (!fs.existsSync(filePath)) {
-            throw new common_1.HttpException('Zip file has expired. Please create a new job.', common_1.HttpStatus.GONE);
-        }
-        const stats = fs.statSync(filePath);
-        const disposition = inline ? 'inline' : 'attachment';
-        res.setHeader('Content-Type', 'application/zip');
-        res.setHeader('Content-Length', stats.size.toString());
-        res.setHeader('Content-Disposition', `${disposition}; filename="${job.zipFileName || 'archive.zip'}"`);
-        res.setHeader('Cache-Control', 'no-cache');
-        const readStream = fs.createReadStream(filePath);
-        readStream.on('error', (err) => {
-            this.logger.error('Error streaming zip file:', err);
-            if (!res.headersSent) {
-                res.status(500).send('Download error');
-            }
-        });
-        readStream.on('end', () => {
-            this.cleanupJob(jobId, filePath);
-        });
-        readStream.pipe(res);
-    }
-    async listJobs(status, limit = 20) {
-        const pattern = this.JOB_PREFIX + '*';
-        const keys = await this.redis.keys(pattern);
-        const jobs = [];
-        for (const key of keys.slice(0, limit)) {
-            const job = await this.redis.hgetall(key);
-            if (!status || job.status === status) {
-                const jobId = key.replace(this.JOB_PREFIX, '');
-                jobs.push({
-                    jobId,
-                    status: job.status,
-                    createdAt: new Date(parseInt(job.createdAt || '0')).toISOString(),
-                    fileCount: parseInt(job.fileCount || '0'),
-                    zipFileName: job.zipFileName,
-                });
-            }
-        }
-        return {
-            jobs: jobs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
-            total: jobs.length,
-        };
-    }
-    async cancelJob(jobId) {
-        const jobKey = this.JOB_PREFIX + jobId;
-        const job = await this.redis.hgetall(jobKey);
-        if (!job || Object.keys(job).length === 0) {
-            throw new common_1.HttpException('Job not found', common_1.HttpStatus.NOT_FOUND);
-        }
-        if (job.status === 'completed' || job.status === 'failed') {
-            throw new common_1.HttpException('Job cannot be cancelled (already completed or failed)', common_1.HttpStatus.CONFLICT);
-        }
-        await this.redis.hset(jobKey, 'status', 'cancelled');
-        await this.redis.srem(this.ACTIVE_JOBS_KEY, jobId);
-        return {
-            message: 'Job cancelled successfully',
-            jobId,
-        };
+    formatFileSize(bytes) {
+        if (bytes === 0)
+            return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
     }
     async getHealthStatus() {
-        const activeJobs = await this.redis.scard(this.ACTIVE_JOBS_KEY);
         return {
             status: 'healthy',
             workers: {
@@ -237,36 +166,28 @@ let ZipService = ZipService_1 = class ZipService {
                 total: this.piscina.options.maxThreads,
                 queue: this.piscina.queueSize,
             },
-            redis: this.redis.status,
-            activeJobs,
-            uptime: process.uptime(),
+            redis: {
+                status: this.redis.status,
+            },
+            mode: 'streaming',
+            features: ['worker-threads', 'direct-streaming', 'memory-optimized'],
+            uptime: this.formatUptime(process.uptime()),
+            memoryUsage: this.formatMemoryUsage(process.memoryUsage()),
         };
     }
-    async updateJobStatus(jobId, status, error) {
-        const updates = { status };
-        if (error)
-            updates.error = error;
-        await this.redis.hmset(this.JOB_PREFIX + jobId, updates);
+    formatUptime(uptime) {
+        const days = Math.floor(uptime / 86400);
+        const hours = Math.floor((uptime % 86400) / 3600);
+        const minutes = Math.floor((uptime % 3600) / 60);
+        return `${days}d ${hours}h ${minutes}m`;
     }
-    async cleanupJob(jobId, filePath) {
-        if (filePath && fs.existsSync(filePath)) {
-            fs.unlink(filePath, (err) => {
-                if (err)
-                    this.logger.error(`Failed to delete temp file: ${filePath}`, err);
-                else
-                    this.logger.log(`Cleaned up temp file: ${filePath}`);
-            });
-        }
-        await this.redis.del(this.JOB_PREFIX + jobId);
-        await this.redis.srem(this.ACTIVE_JOBS_KEY, jobId);
-    }
-    formatFileSize(bytes) {
-        if (bytes === 0)
-            return '0 B';
-        const k = 1024;
-        const sizes = ['B', 'KB', 'MB', 'GB'];
-        const i = Math.floor(Math.log(bytes) / Math.log(k));
-        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    formatMemoryUsage(memUsage) {
+        return {
+            rss: this.formatFileSize(memUsage.rss),
+            heapTotal: this.formatFileSize(memUsage.heapTotal),
+            heapUsed: this.formatFileSize(memUsage.heapUsed),
+            external: this.formatFileSize(memUsage.external),
+        };
     }
 };
 exports.ZipService = ZipService;
