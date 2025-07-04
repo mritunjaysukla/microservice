@@ -3,7 +3,6 @@ import * as fs from 'fs';
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
 import * as path from 'path';
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { pipeline } from 'stream/promises';
 import { createWriteStream } from 'fs';
 
@@ -11,13 +10,9 @@ interface ZipTaskParams {
   fileUrls: string[];
   zipFileName?: string;
   jobId?: string;
-  s3Config?: {
-    region: string;
-    endpoint: string;
-    accessKeyId: string;
-    secretAccessKey: string;
-    bucketName: string;
-  };
+  streaming?: boolean;
+  batchSize?: number;
+  maxRetries?: number;
 }
 
 interface ZipResult {
@@ -25,28 +20,35 @@ interface ZipResult {
   fileSize: number;
   successCount: number;
   totalCount: number;
-  s3Key?: string;
   processingTime?: number;
 }
 
 /**
- * Enhanced zip worker with optimized performance for large files
+ * Optimized zip worker for streaming with enhanced performance
  * Features:
- * - Parallel file downloading with connection pooling
- * - Streaming architecture to handle unlimited file sizes
- * - Progress tracking and detailed error reporting
- * - Memory-efficient processing
- * - Automatic retry mechanism for failed downloads
+ * - Optimized for direct streaming (smaller batches, faster response)
+ * - Memory-efficient processing for large files
+ * - Parallel file downloading with smart concurrency
+ * - Enhanced error handling and retry mechanism
+ * - HEIC/MOV file extension conversion
  */
 export default async function zipTask(params: ZipTaskParams): Promise<ZipResult> {
-  const { fileUrls, zipFileName, jobId, s3Config } = params;
+  const { 
+    fileUrls, 
+    zipFileName, 
+    jobId, 
+    streaming = false,
+    batchSize = streaming ? 3 : 5, // Smaller batches for streaming
+    maxRetries = streaming ? 2 : 3  // Fewer retries for faster response
+  } = params;
+  
   const startTime = Date.now();
 
   if (!fileUrls || fileUrls.length === 0) {
     throw new Error('No file URLs provided');
   }
 
-  console.log(`[${jobId}] Starting zip processing for ${fileUrls.length} files`);
+  console.log(`[${jobId}] Starting ${streaming ? 'streaming' : 'standard'} zip processing for ${fileUrls.length} files`);
 
   return new Promise(async (resolve, reject) => {
     const fileName = zipFileName || `archive-${uuidv4()}.zip`;
@@ -59,30 +61,35 @@ export default async function zipTask(params: ZipTaskParams): Promise<ZipResult>
 
     const tempPath = path.join(tempDir, fileName);
     const output = createWriteStream(tempPath, { 
-      highWaterMark: 64 * 1024 // 64KB buffer for better performance
+      highWaterMark: streaming ? 32 * 1024 : 64 * 1024 // Smaller buffer for streaming
     });
     
-    // Configure archiver for optimal performance with large files
+    // Configure archiver for optimal performance
     const archive = archiver('zip', {
       zlib: { 
-        level: 6, // Balanced compression (faster than level 9, good compression)
-        chunkSize: 32 * 1024 // 32KB chunks for better streaming
+        level: streaming ? 3 : 6, // Faster compression for streaming
+        chunkSize: streaming ? 16 * 1024 : 32 * 1024
       },
       forceLocalTime: true,
-      comment: `Created by Zip Microservice - Job: ${jobId || 'unknown'}`
+      comment: `Created by Optimized Zip Service - Job: ${jobId || 'unknown'}`
     });
 
     let isFinalized = false;
     let successCount = 0;
     let processedCount = 0;
 
-    // Enhanced error handling
+    // Enhanced cleanup function
     const cleanup = () => {
       if (fs.existsSync(tempPath)) {
-        fs.unlinkSync(tempPath);
+        try {
+          fs.unlinkSync(tempPath);
+        } catch (error) {
+          console.warn(`[${jobId}] Failed to cleanup temp file: ${error.message}`);
+        }
       }
     };
 
+    // Handle completion
     output.on('close', () => {
       if (!isFinalized) {
         try {
@@ -94,6 +101,7 @@ export default async function zipTask(params: ZipTaskParams): Promise<ZipResult>
           console.log(`  - Size: ${formatFileSize(stats.size)}`);
           console.log(`  - Files: ${successCount}/${fileUrls.length}`);
           console.log(`  - Processing time: ${processingTime}ms`);
+          console.log(`  - Mode: ${streaming ? 'streaming' : 'standard'}`);
           
           resolve({
             filePath: tempPath,
@@ -110,6 +118,7 @@ export default async function zipTask(params: ZipTaskParams): Promise<ZipResult>
       }
     });
 
+    // Error handlers
     output.on('error', (err) => {
       console.error(`[${jobId}] Output stream error:`, err);
       cleanup();
@@ -136,29 +145,35 @@ export default async function zipTask(params: ZipTaskParams): Promise<ZipResult>
     archive.pipe(output);
 
     try {
-      // Process files with controlled concurrency to prevent memory issues
-      const BATCH_SIZE = 5; // Process 5 files concurrently
-      const MAX_RETRIES = 3;
-      const REQUEST_TIMEOUT = 60000; // 60 seconds timeout
+      // Process files with optimized concurrency
+      const REQUEST_TIMEOUT = streaming ? 30000 : 60000; // Shorter timeout for streaming
 
-      for (let i = 0; i < fileUrls.length; i += BATCH_SIZE) {
-        const batch = fileUrls.slice(i, i + BATCH_SIZE);
+      for (let i = 0; i < fileUrls.length; i += batchSize) {
+        const batch = fileUrls.slice(i, i + batchSize);
         
-        // Process batch concurrently
+        // Process batch concurrently with optimized settings
         await Promise.allSettled(
           batch.map(async (fileUrl, batchIndex) => {
             const fileIndex = i + batchIndex;
             let attempts = 0;
             let lastError: any;
 
-            while (attempts < MAX_RETRIES) {
+            while (attempts < maxRetries) {
               try {
-                await processFile(fileUrl, fileIndex, archive, jobId, REQUEST_TIMEOUT);
+                await processFileOptimized(
+                  fileUrl, 
+                  fileIndex, 
+                  archive, 
+                  jobId, 
+                  REQUEST_TIMEOUT,
+                  streaming
+                );
                 successCount++;
                 processedCount++;
                 
-                // Log progress every 10 files or at the end
-                if (processedCount % 10 === 0 || processedCount === fileUrls.length) {
+                // More frequent progress updates for streaming
+                const logInterval = streaming ? 5 : 10;
+                if (processedCount % logInterval === 0 || processedCount === fileUrls.length) {
                   console.log(`[${jobId}] Progress: ${processedCount}/${fileUrls.length} files processed (${successCount} successful)`);
                 }
                 
@@ -166,24 +181,24 @@ export default async function zipTask(params: ZipTaskParams): Promise<ZipResult>
               } catch (error) {
                 attempts++;
                 lastError = error;
-                console.warn(`[${jobId}] File ${fileIndex + 1} failed (attempt ${attempts}/${MAX_RETRIES}):`, error.message);
                 
-                if (attempts < MAX_RETRIES) {
-                  // Wait before retry (exponential backoff)
-                  await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempts) * 1000));
+                if (attempts < maxRetries) {
+                  // Shorter wait time for streaming
+                  const backoffTime = streaming ? 500 : 1000;
+                  await new Promise(resolve => setTimeout(resolve, backoffTime * attempts));
+                } else {
+                  console.error(`[${jobId}] File ${fileIndex + 1} permanently failed:`, lastError.message);
                 }
               }
             }
             
-            // If we get here, all retries failed
             processedCount++;
-            console.error(`[${jobId}] File ${fileIndex + 1} permanently failed after ${MAX_RETRIES} attempts:`, lastError.message);
           })
         );
 
-        // Small delay between batches to prevent overwhelming the system
-        if (i + BATCH_SIZE < fileUrls.length) {
-          await new Promise(resolve => setTimeout(resolve, 100));
+        // Smaller delay between batches for streaming
+        if (i + batchSize < fileUrls.length) {
+          await new Promise(resolve => setTimeout(resolve, streaming ? 50 : 100));
         }
       }
 
@@ -208,108 +223,115 @@ export default async function zipTask(params: ZipTaskParams): Promise<ZipResult>
 }
 
 /**
- * Process individual file with enhanced error handling and validation
+ * Optimized file processing with streaming enhancements
  */
-async function processFile(
+async function processFileOptimized(
   fileUrl: string, 
   fileIndex: number, 
   archive: archiver.Archiver,
   jobId?: string,
-  timeout: number = 60000
+  timeout: number = 30000,
+  streaming: boolean = false
 ): Promise<void> {
   const decodedUrl = decodeURIComponent(fileUrl);
-  console.log(`[${jobId}] Processing file ${fileIndex + 1}: ${decodedUrl}`);
 
-  // Enhanced HTTP client configuration
+  // Enhanced HTTP client configuration for streaming
   const axiosConfig = {
     responseType: 'stream' as const,
     timeout,
-    maxContentLength: Infinity, // No limit on file size
+    maxContentLength: Infinity,
     maxBodyLength: Infinity,
     headers: {
-      'User-Agent': 'ZIP-Microservice/2.0',
+      'User-Agent': 'OptimizedZipService/2.0',
       'Accept': '*/*',
-      'Connection': 'keep-alive'
+      'Connection': 'keep-alive',
+      'Accept-Encoding': streaming ? 'identity' : 'gzip, deflate' // Skip compression for streaming
     },
-    // Disable compression to save CPU during download
-    decompress: false,
-    // Enable HTTP/2 if available
-    httpAgent: false,
-    httpsAgent: false
+    decompress: !streaming, // Skip decompression for streaming to save CPU
+    validateStatus: (status: number) => status === 200,
   };
 
   const response = await axios.get(decodedUrl, axiosConfig);
 
-  // Validate response
-  if (response.status !== 200) {
-    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-  }
-
-  // Extract filename with better logic
-  let fileName = extractFileName(decodedUrl, fileIndex);
+  // Enhanced filename extraction and normalization
+  let fileName = extractOptimizedFileName(decodedUrl, fileIndex);
+  fileName = normalizeFileNameEnhanced(fileName);
   
-  // Handle special file extensions
-  fileName = normalizeFileName(fileName);
-
-  // Ensure unique filename within the archive
+  // Add index prefix to ensure uniqueness and ordering
   fileName = `${String(fileIndex + 1).padStart(3, '0')}_${fileName}`;
 
-  // Get content length for progress tracking
+  // Get content length for logging
   const contentLength = parseInt(response.headers['content-length'] || '0');
-  if (contentLength > 0) {
+  if (contentLength > 0 && !streaming) {
     console.log(`[${jobId}] File ${fileIndex + 1} size: ${formatFileSize(contentLength)}`);
   }
 
-  // Stream the file directly to the archive
+  // Enhanced stream error handling
   const fileStream = response.data;
-  
-  // Add error handling to the stream
   fileStream.on('error', (streamError: any) => {
     throw new Error(`Stream error: ${streamError.message}`);
   });
 
-  // Append to archive with metadata
+  // Add to archive with optimized metadata
   archive.append(fileStream, { 
     name: fileName,
-    date: new Date()
+    date: new Date(),
+    mode: 0o644 // Standard file permissions
   });
 
-  console.log(`[${jobId}] File ${fileIndex + 1} added to archive: ${fileName}`);
+  if (streaming || fileIndex % 10 === 0) {
+    console.log(`[${jobId}] File ${fileIndex + 1} added: ${fileName}`);
+  }
 }
 
 /**
- * Extract meaningful filename from URL
+ * Enhanced filename extraction with better URL parsing
  */
-function extractFileName(url: string, fallbackIndex: number): string {
+function extractOptimizedFileName(url: string, fallbackIndex: number): string {
   try {
     const urlPath = new URL(url).pathname;
-    const pathParts = urlPath.split('/').filter(part => part.length > 0);
+    const pathSegments = urlPath.split('/').filter(segment => segment.length > 0);
     
-    if (pathParts.length > 0) {
-      const lastPart = pathParts[pathParts.length - 1];
-      // Remove query parameters if they somehow got through
-      const cleanName = lastPart.split('?')[0];
-      if (cleanName && cleanName.length > 0) {
+    if (pathSegments.length > 0) {
+      const lastSegment = pathSegments[pathSegments.length - 1];
+      const cleanName = lastSegment.split('?')[0].split('#')[0];
+      
+      if (cleanName && cleanName.length > 0 && cleanName !== '/') {
         return cleanName;
       }
     }
+    
+    // Try to extract from query parameters (common in CDN URLs)
+    const urlObj = new URL(url);
+    const filename = urlObj.searchParams.get('filename') || 
+                    urlObj.searchParams.get('file') ||
+                    urlObj.searchParams.get('name');
+    
+    if (filename) {
+      return filename;
+    }
+    
   } catch (error) {
-    console.warn(`Failed to extract filename from URL: ${url}`);
+    console.warn(`Failed to extract filename from URL: ${url.substring(0, 100)}...`);
   }
   
   return `file-${fallbackIndex + 1}`;
 }
 
 /**
- * Normalize filename and handle special extensions
+ * Enhanced filename normalization with better extension handling
  */
-function normalizeFileName(fileName: string): string {
-  // Handle special extensions that need conversion
+function normalizeFileNameEnhanced(fileName: string): string {
+  // Enhanced extension mapping
   const extensionMap: { [key: string]: string } = {
     '.heic': '.jpg',
     '.HEIC': '.jpg',
     '.mov': '.mp4',
-    '.MOV': '.mp4'
+    '.MOV': '.mp4',
+    '.jpeg': '.jpg',
+    '.JPEG': '.jpg',
+    '.tiff': '.tif',
+    '.TIFF': '.tif'
   };
 
   // Apply extension mapping
@@ -320,14 +342,19 @@ function normalizeFileName(fileName: string): string {
     }
   }
 
-  // Sanitize filename
-  fileName = fileName.replace(/[^\w\-_.]/g, '_');
+  // Enhanced filename sanitization
+  fileName = fileName
+    .replace(/[<>:"/\\|?*]/g, '_') // Replace invalid characters
+    .replace(/\s+/g, '_') // Replace spaces with underscores
+    .replace(/_{2,}/g, '_') // Replace multiple underscores with single
+    .replace(/^_|_$/g, ''); // Remove leading/trailing underscores
   
-  // Ensure filename is not too long
-  if (fileName.length > 100) {
+  // Ensure filename length is reasonable
+  const maxLength = 100;
+  if (fileName.length > maxLength) {
     const ext = path.extname(fileName);
     const base = path.basename(fileName, ext);
-    fileName = base.substring(0, 100 - ext.length) + ext;
+    fileName = base.substring(0, maxLength - ext.length) + ext;
   }
 
   // Ensure we have an extension
@@ -335,19 +362,24 @@ function normalizeFileName(fileName: string): string {
     fileName += '.bin';
   }
 
+  // Ensure filename is not empty
+  if (!fileName || fileName === '.bin') {
+    fileName = 'unknown_file.bin';
+  }
+
   return fileName;
 }
 
 /**
- * Format file size for human reading
+ * Optimized file size formatting
  */
 function formatFileSize(bytes: number): string {
   if (bytes === 0) return '0 B';
   const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const sizes = ['B', 'KB', 'MB', 'GB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
-// For CommonJS compatibility
+// Export for CommonJS compatibility
 module.exports = zipTask;

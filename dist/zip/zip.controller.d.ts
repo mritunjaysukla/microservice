@@ -4,41 +4,38 @@ import { ZipRequestDto } from './dto/zip-request.dto';
 export declare class ZipController {
     private readonly zipService;
     constructor(zipService: ZipService);
-    createZipJob(dto: ZipRequestDto): Promise<{
-        jobId: string;
-        message: string;
-        estimatedTime: string;
-    }>;
-    getJobStatus(jobId: string): Promise<{
-        status: string;
-        error?: string;
-        downloadUrl?: string;
-        progress?: string;
-        fileSize?: string;
-        fileCount?: number;
-        successCount?: number;
-        createdAt?: string;
-        expiresAt?: string;
-        message?: string;
-    }>;
-    downloadZip(jobId: string, res: Response, inline?: boolean): Promise<void>;
-    listJobs(status?: string, limit?: number): Promise<{
-        jobs: any[];
-        total: number;
-    }>;
-    cancelJob(jobId: string): Promise<{
-        message: string;
-        jobId: string;
-    }>;
-    healthCheck(): Promise<{
+    createZip(dto: ZipRequestDto, res: Response): Promise<void>;
+    getHealth(): Promise<{
         status: string;
         workers: {
             active: number;
             total: number;
             queue: number;
         };
-        redis: "wait" | "reconnecting" | "connecting" | "connect" | "ready" | "close" | "end";
-        activeJobs: number;
-        uptime: number;
+        redis: {
+            status: "end" | "close" | "ready" | "wait" | "reconnecting" | "connecting" | "connect";
+        };
+        mode: string;
+        features: string[];
+        uptime: string;
+        memoryUsage: {
+            rss: string;
+            heapTotal: string;
+            heapUsed: string;
+            external: string;
+        };
+    }>;
+    getInfo(): Promise<{
+        name: string;
+        version: string;
+        description: string;
+        features: string[];
+        supportedFileTypes: string[];
+        performance: {
+            maxConcurrentFiles: string;
+            processingMode: string;
+            memoryUsage: string;
+            responseTime: string;
+        };
     }>;
 }
