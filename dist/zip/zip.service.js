@@ -24,8 +24,6 @@ let ZipService = ZipService_1 = class ZipService {
         this.redis = new ioredis_1.default({
             host: process.env.REDIS_HOST || 'localhost',
             port: parseInt(process.env.REDIS_PORT || '6379'),
-            retryStrategy: () => 100,
-            maxRetriesPerRequest: 3,
         });
         this.s3Client = new client_s3_1.S3Client({
             region: process.env.S3_REGION || 'custom-region',
@@ -61,41 +59,25 @@ let ZipService = ZipService_1 = class ZipService {
         if (!fileUrls || fileUrls.length === 0) {
             throw new Error('No file URLs provided');
         }
-        const validUrls = this.validateUrls(fileUrls);
-        if (validUrls.length === 0) {
-            throw new Error('No valid URLs provided');
-        }
-        const jobId = `stream-${(0, uuid_1.v4)()}`;
-        const finalZipName = zipFileName || 'archive.zip';
-        this.logger.log(`Starting streaming zip job ${jobId} for ${validUrls.length} files`);
+        const jobId = `zip-${(0, uuid_1.v4)()}`;
+        this.logger.log(`Starting zip job ${jobId} for ${fileUrls.length} files`);
         res.setHeader('Content-Type', 'application/zip');
-        res.setHeader('Content-Disposition', `attachment; filename="${finalZipName}"`);
-        res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Transfer-Encoding', 'chunked');
+        res.setHeader('Content-Disposition', `attachment; filename="${zipFileName || 'archive.zip'}"`);
         try {
             const result = await this.piscina.run({
-                fileUrls: validUrls,
-                zipFileName: finalZipName,
-                jobId: jobId,
-                streaming: true,
-                batchSize: 3,
-                maxRetries: 2,
+                fileUrls: fileUrls,
+                zipFileName: zipFileName || 'archive.zip',
+                jobId: jobId
             });
             if (!result || !result.filePath || !fs.existsSync(result.filePath)) {
-                throw new Error('Worker failed to create zip file');
+                throw new Error('Failed to create zip file');
             }
-            this.logger.log(`Zip created successfully: ${result.filePath} (${this.formatFileSize(result.fileSize)})`);
-            this.logger.log(`Processed ${result.successCount}/${validUrls.length} files successfully`);
+            this.logger.log(`Zip created: ${result.filePath} (${this.formatFileSize(result.fileSize)})`);
             const stats = fs.statSync(result.filePath);
             res.setHeader('Content-Length', stats.size.toString());
-            const readStream = fs.createReadStream(result.filePath, {
-                highWaterMark: 64 * 1024
-            });
+            const readStream = fs.createReadStream(result.filePath);
             readStream.on('error', (error) => {
                 this.logger.error(`Stream error for job ${jobId}:`, error);
-                if (!res.headersSent) {
-                    res.status(500).send('Error streaming zip file');
-                }
                 this.cleanupTempFile(result.filePath);
             });
             readStream.on('end', () => {
@@ -107,36 +89,9 @@ let ZipService = ZipService_1 = class ZipService {
         catch (error) {
             this.logger.error(`Error during zip creation for job ${jobId}:`, error);
             if (!res.headersSent) {
-                res.status(500).json({
-                    error: 'Failed to create zip file',
-                    message: error.message,
-                    jobId: jobId
-                });
-            }
-            else {
-                res.end();
+                res.status(500).send('Error creating ZIP archive');
             }
         }
-    }
-    validateUrls(urls) {
-        const validUrls = [];
-        for (const url of urls) {
-            try {
-                const decodedUrl = decodeURIComponent(url);
-                const parsedUrl = new URL(decodedUrl);
-                if (parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:') {
-                    validUrls.push(url);
-                }
-                else {
-                    this.logger.warn(`Invalid protocol for URL: ${url}`);
-                }
-            }
-            catch (error) {
-                this.logger.warn(`Invalid URL format: ${url}`, error.message);
-            }
-        }
-        this.logger.log(`Validated ${validUrls.length}/${urls.length} URLs`);
-        return validUrls;
     }
     cleanupTempFile(filePath) {
         if (filePath && fs.existsSync(filePath)) {
@@ -157,37 +112,6 @@ let ZipService = ZipService_1 = class ZipService {
         const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
         const i = Math.floor(Math.log(bytes) / Math.log(k));
         return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-    }
-    async getHealthStatus() {
-        return {
-            status: 'healthy',
-            workers: {
-                active: this.piscina.threads.length,
-                total: this.piscina.options.maxThreads,
-                queue: this.piscina.queueSize,
-            },
-            redis: {
-                status: this.redis.status,
-            },
-            mode: 'streaming',
-            features: ['worker-threads', 'direct-streaming', 'memory-optimized'],
-            uptime: this.formatUptime(process.uptime()),
-            memoryUsage: this.formatMemoryUsage(process.memoryUsage()),
-        };
-    }
-    formatUptime(uptime) {
-        const days = Math.floor(uptime / 86400);
-        const hours = Math.floor((uptime % 86400) / 3600);
-        const minutes = Math.floor((uptime % 3600) / 60);
-        return `${days}d ${hours}h ${minutes}m`;
-    }
-    formatMemoryUsage(memUsage) {
-        return {
-            rss: this.formatFileSize(memUsage.rss),
-            heapTotal: this.formatFileSize(memUsage.heapTotal),
-            heapUsed: this.formatFileSize(memUsage.heapUsed),
-            external: this.formatFileSize(memUsage.external),
-        };
     }
 };
 exports.ZipService = ZipService;

@@ -8,12 +8,12 @@ const uuid_1 = require("uuid");
 const path = require("path");
 const fs_1 = require("fs");
 async function zipTask(params) {
-    const { fileUrls, zipFileName, jobId, streaming = false, batchSize = streaming ? 3 : 5, maxRetries = streaming ? 2 : 3 } = params;
+    const { fileUrls, zipFileName, jobId } = params;
     const startTime = Date.now();
     if (!fileUrls || fileUrls.length === 0) {
         throw new Error('No file URLs provided');
     }
-    console.log(`[${jobId}] Starting ${streaming ? 'streaming' : 'standard'} zip processing for ${fileUrls.length} files`);
+    console.log(`[${jobId}] Starting zip processing for ${fileUrls.length} files`);
     return new Promise(async (resolve, reject) => {
         const fileName = zipFileName || `archive-${(0, uuid_1.v4)()}.zip`;
         const tempDir = path.resolve(__dirname, '../../tmp');
@@ -21,16 +21,10 @@ async function zipTask(params) {
             fs.mkdirSync(tempDir, { recursive: true });
         }
         const tempPath = path.join(tempDir, fileName);
-        const output = (0, fs_1.createWriteStream)(tempPath, {
-            highWaterMark: streaming ? 32 * 1024 : 64 * 1024
-        });
+        const output = (0, fs_1.createWriteStream)(tempPath);
         const archive = archiver('zip', {
-            zlib: {
-                level: streaming ? 3 : 6,
-                chunkSize: streaming ? 16 * 1024 : 32 * 1024
-            },
+            zlib: { level: 0 },
             forceLocalTime: true,
-            comment: `Created by Optimized Zip Service - Job: ${jobId || 'unknown'}`
         });
         let isFinalized = false;
         let successCount = 0;
@@ -41,7 +35,7 @@ async function zipTask(params) {
                     fs.unlinkSync(tempPath);
                 }
                 catch (error) {
-                    console.warn(`[${jobId}] Failed to cleanup temp file: ${error.message}`);
+                    console.warn(`[${jobId}] Cleanup failed:`, error.message);
                 }
             }
         };
@@ -50,29 +44,23 @@ async function zipTask(params) {
                 try {
                     const stats = fs.statSync(tempPath);
                     const processingTime = Date.now() - startTime;
-                    console.log(`[${jobId}] Archive created successfully:`);
-                    console.log(`  - File: ${tempPath}`);
-                    console.log(`  - Size: ${formatFileSize(stats.size)}`);
-                    console.log(`  - Files: ${successCount}/${fileUrls.length}`);
-                    console.log(`  - Processing time: ${processingTime}ms`);
-                    console.log(`  - Mode: ${streaming ? 'streaming' : 'standard'}`);
+                    console.log(`[${jobId}] Zip created: ${tempPath} (${formatFileSize(stats.size)}) in ${(processingTime / 1000).toFixed(1)}s`);
+                    console.log(`[${jobId}] Files: ${successCount}/${fileUrls.length} successful`);
                     resolve({
                         filePath: tempPath,
                         fileSize: stats.size,
                         successCount,
                         totalCount: fileUrls.length,
-                        processingTime
                     });
                 }
                 catch (error) {
-                    console.error(`[${jobId}] Error reading archive stats:`, error);
                     cleanup();
                     reject(error);
                 }
             }
         });
         output.on('error', (err) => {
-            console.error(`[${jobId}] Output stream error:`, err);
+            console.error(`[${jobId}] Output error:`, err);
             cleanup();
             reject(err);
         });
@@ -83,50 +71,44 @@ async function zipTask(params) {
         });
         archive.on('warning', (err) => {
             if (err.code === 'ENOENT') {
-                console.warn(`[${jobId}] Archive warning:`, err.message);
+                console.warn(`[${jobId}] Warning:`, err.message);
             }
             else {
-                console.error(`[${jobId}] Archive critical warning:`, err);
                 cleanup();
                 reject(err);
             }
         });
         archive.pipe(output);
         try {
-            const REQUEST_TIMEOUT = streaming ? 30000 : 60000;
-            for (let i = 0; i < fileUrls.length; i += batchSize) {
-                const batch = fileUrls.slice(i, i + batchSize);
+            const BATCH_SIZE = 5;
+            const MAX_RETRIES = 2;
+            const REQUEST_TIMEOUT = 30000;
+            for (let i = 0; i < fileUrls.length; i += BATCH_SIZE) {
+                const batch = fileUrls.slice(i, i + BATCH_SIZE);
                 await Promise.allSettled(batch.map(async (fileUrl, batchIndex) => {
                     const fileIndex = i + batchIndex;
                     let attempts = 0;
-                    let lastError;
-                    while (attempts < maxRetries) {
+                    while (attempts < MAX_RETRIES) {
                         try {
-                            await processFileOptimized(fileUrl, fileIndex, archive, jobId, REQUEST_TIMEOUT, streaming);
+                            await processFile(fileUrl, fileIndex, archive, REQUEST_TIMEOUT);
                             successCount++;
                             processedCount++;
-                            const logInterval = streaming ? 5 : 10;
-                            if (processedCount % logInterval === 0 || processedCount === fileUrls.length) {
-                                console.log(`[${jobId}] Progress: ${processedCount}/${fileUrls.length} files processed (${successCount} successful)`);
+                            if (processedCount % 20 === 0 || processedCount === fileUrls.length) {
+                                console.log(`[${jobId}] Progress: ${processedCount}/${fileUrls.length} files processed`);
                             }
                             return;
                         }
                         catch (error) {
                             attempts++;
-                            lastError = error;
-                            if (attempts < maxRetries) {
-                                const backoffTime = streaming ? 500 : 1000;
-                                await new Promise(resolve => setTimeout(resolve, backoffTime * attempts));
-                            }
-                            else {
-                                console.error(`[${jobId}] File ${fileIndex + 1} permanently failed:`, lastError.message);
+                            if (attempts >= MAX_RETRIES) {
+                                console.error(`[${jobId}] File ${fileIndex + 1} failed:`, error.message);
                             }
                         }
                     }
                     processedCount++;
                 }));
-                if (i + batchSize < fileUrls.length) {
-                    await new Promise(resolve => setTimeout(resolve, streaming ? 50 : 100));
+                if (i + BATCH_SIZE < fileUrls.length) {
+                    await new Promise(resolve => setTimeout(resolve, 50));
                 }
             }
             if (successCount === 0) {
@@ -134,111 +116,75 @@ async function zipTask(params) {
                 reject(new Error('No files were successfully processed'));
                 return;
             }
-            console.log(`[${jobId}] Successfully processed ${successCount}/${fileUrls.length} files`);
+            console.log(`[${jobId}] Processing complete: ${successCount}/${fileUrls.length} files`);
             isFinalized = true;
             await archive.finalize();
         }
         catch (err) {
-            console.error(`[${jobId}] Error during archive creation:`, err);
+            console.error(`[${jobId}] Processing error:`, err);
             cleanup();
             reject(err);
         }
     });
 }
-async function processFileOptimized(fileUrl, fileIndex, archive, jobId, timeout = 30000, streaming = false) {
+async function processFile(fileUrl, fileIndex, archive, timeout = 30000) {
     const decodedUrl = decodeURIComponent(fileUrl);
-    const axiosConfig = {
+    const response = await axios_1.default.get(decodedUrl, {
         responseType: 'stream',
         timeout,
         maxContentLength: Infinity,
         maxBodyLength: Infinity,
         headers: {
-            'User-Agent': 'OptimizedZipService/2.0',
+            'User-Agent': 'ZipService/1.0',
             'Accept': '*/*',
-            'Connection': 'keep-alive',
-            'Accept-Encoding': streaming ? 'identity' : 'gzip, deflate'
         },
-        decompress: !streaming,
-        validateStatus: (status) => status === 200,
-    };
-    const response = await axios_1.default.get(decodedUrl, axiosConfig);
-    let fileName = extractOptimizedFileName(decodedUrl, fileIndex);
-    fileName = normalizeFileNameEnhanced(fileName);
-    fileName = `${String(fileIndex + 1).padStart(3, '0')}_${fileName}`;
-    const contentLength = parseInt(response.headers['content-length'] || '0');
-    if (contentLength > 0 && !streaming) {
-        console.log(`[${jobId}] File ${fileIndex + 1} size: ${formatFileSize(contentLength)}`);
+    });
+    if (response.status !== 200) {
+        throw new Error(`HTTP ${response.status}`);
     }
+    let fileName = extractFileName(decodedUrl, fileIndex);
+    fileName = normalizeFileName(fileName);
+    fileName = `${String(fileIndex + 1).padStart(3, '0')}_${fileName}`;
     const fileStream = response.data;
     fileStream.on('error', (streamError) => {
         throw new Error(`Stream error: ${streamError.message}`);
     });
     archive.append(fileStream, {
         name: fileName,
-        date: new Date(),
-        mode: 0o644
+        date: new Date()
     });
-    if (streaming || fileIndex % 10 === 0) {
-        console.log(`[${jobId}] File ${fileIndex + 1} added: ${fileName}`);
-    }
 }
-function extractOptimizedFileName(url, fallbackIndex) {
+function extractFileName(url, fallbackIndex) {
     try {
         const urlPath = new URL(url).pathname;
         const pathSegments = urlPath.split('/').filter(segment => segment.length > 0);
         if (pathSegments.length > 0) {
             const lastSegment = pathSegments[pathSegments.length - 1];
-            const cleanName = lastSegment.split('?')[0].split('#')[0];
-            if (cleanName && cleanName.length > 0 && cleanName !== '/') {
+            const cleanName = lastSegment.split('?')[0];
+            if (cleanName && cleanName.length > 0) {
                 return cleanName;
             }
         }
-        const urlObj = new URL(url);
-        const filename = urlObj.searchParams.get('filename') ||
-            urlObj.searchParams.get('file') ||
-            urlObj.searchParams.get('name');
-        if (filename) {
-            return filename;
-        }
     }
     catch (error) {
-        console.warn(`Failed to extract filename from URL: ${url.substring(0, 100)}...`);
     }
     return `file-${fallbackIndex + 1}`;
 }
-function normalizeFileNameEnhanced(fileName) {
-    const extensionMap = {
-        '.heic': '.jpg',
-        '.HEIC': '.jpg',
-        '.mov': '.mp4',
-        '.MOV': '.mp4',
-        '.jpeg': '.jpg',
-        '.JPEG': '.jpg',
-        '.tiff': '.tif',
-        '.TIFF': '.tif'
-    };
-    for (const [oldExt, newExt] of Object.entries(extensionMap)) {
-        if (fileName.toLowerCase().endsWith(oldExt.toLowerCase())) {
-            fileName = fileName.slice(0, -oldExt.length) + newExt;
-            break;
-        }
+function normalizeFileName(fileName) {
+    if (fileName.toLowerCase().endsWith('.heic')) {
+        fileName = fileName.replace(/\.heic$/i, '.jpg');
     }
-    fileName = fileName
-        .replace(/[<>:"/\\|?*]/g, '_')
-        .replace(/\s+/g, '_')
-        .replace(/_{2,}/g, '_')
-        .replace(/^_|_$/g, '');
-    const maxLength = 100;
-    if (fileName.length > maxLength) {
+    if (fileName.toLowerCase().endsWith('.mov')) {
+        fileName = fileName.replace(/\.mov$/i, '.mp4');
+    }
+    fileName = fileName.replace(/[^\w\-_.]/g, '_');
+    if (fileName.length > 100) {
         const ext = path.extname(fileName);
         const base = path.basename(fileName, ext);
-        fileName = base.substring(0, maxLength - ext.length) + ext;
+        fileName = base.substring(0, 100 - ext.length) + ext;
     }
     if (!path.extname(fileName)) {
         fileName += '.bin';
-    }
-    if (!fileName || fileName === '.bin') {
-        fileName = 'unknown_file.bin';
     }
     return fileName;
 }
