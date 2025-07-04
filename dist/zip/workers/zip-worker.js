@@ -29,6 +29,7 @@ async function zipTask(params) {
         let isFinalized = false;
         let successCount = 0;
         let processedCount = 0;
+        let isCompleted = false;
         const cleanup = () => {
             if (fs.existsSync(tempPath)) {
                 try {
@@ -40,7 +41,8 @@ async function zipTask(params) {
             }
         };
         output.on('close', () => {
-            if (!isFinalized) {
+            if (!isCompleted) {
+                isCompleted = true;
                 try {
                     const stats = fs.statSync(tempPath);
                     const processingTime = Date.now() - startTime;
@@ -62,20 +64,30 @@ async function zipTask(params) {
         output.on('error', (err) => {
             console.error(`[${jobId}] Output error:`, err);
             cleanup();
-            reject(err);
+            if (!isCompleted) {
+                isCompleted = true;
+                reject(err);
+            }
         });
         archive.on('error', (err) => {
             console.error(`[${jobId}] Archive error:`, err);
             cleanup();
-            reject(err);
+            if (!isCompleted) {
+                isCompleted = true;
+                reject(err);
+            }
         });
         archive.on('warning', (err) => {
             if (err.code === 'ENOENT') {
                 console.warn(`[${jobId}] Warning:`, err.message);
             }
             else {
+                console.error(`[${jobId}] Archive critical warning:`, err);
                 cleanup();
-                reject(err);
+                if (!isCompleted) {
+                    isCompleted = true;
+                    reject(err);
+                }
             }
         });
         archive.pipe(output);
@@ -113,17 +125,45 @@ async function zipTask(params) {
             }
             if (successCount === 0) {
                 cleanup();
-                reject(new Error('No files were successfully processed'));
+                if (!isCompleted) {
+                    isCompleted = true;
+                    reject(new Error('No files were successfully processed'));
+                }
                 return;
             }
             console.log(`[${jobId}] Processing complete: ${successCount}/${fileUrls.length} files`);
+            console.log(`[${jobId}] Finalizing archive...`);
+            const finalizeTimeout = setTimeout(() => {
+                if (!isCompleted) {
+                    isCompleted = true;
+                    console.error(`[${jobId}] Archive finalization timed out after 60 seconds`);
+                    cleanup();
+                    reject(new Error('Archive finalization timed out'));
+                }
+            }, 60000);
             isFinalized = true;
-            await archive.finalize();
+            try {
+                await archive.finalize();
+                clearTimeout(finalizeTimeout);
+                console.log(`[${jobId}] Archive finalized successfully`);
+            }
+            catch (finalizeError) {
+                clearTimeout(finalizeTimeout);
+                if (!isCompleted) {
+                    isCompleted = true;
+                    console.error(`[${jobId}] Finalization error:`, finalizeError);
+                    cleanup();
+                    reject(finalizeError);
+                }
+            }
         }
         catch (err) {
             console.error(`[${jobId}] Processing error:`, err);
             cleanup();
-            reject(err);
+            if (!isCompleted) {
+                isCompleted = true;
+                reject(err);
+            }
         }
     });
 }
@@ -146,12 +186,20 @@ async function processFile(fileUrl, fileIndex, archive, timeout = 30000) {
     fileName = normalizeFileName(fileName);
     fileName = `${String(fileIndex + 1).padStart(3, '0')}_${fileName}`;
     const fileStream = response.data;
-    fileStream.on('error', (streamError) => {
-        throw new Error(`Stream error: ${streamError.message}`);
-    });
-    archive.append(fileStream, {
-        name: fileName,
-        date: new Date()
+    return new Promise((resolve, reject) => {
+        fileStream.on('error', (streamError) => {
+            reject(new Error(`Stream error: ${streamError.message}`));
+        });
+        try {
+            archive.append(fileStream, {
+                name: fileName,
+                date: new Date()
+            });
+            resolve();
+        }
+        catch (appendError) {
+            reject(appendError);
+        }
     });
 }
 function extractFileName(url, fallbackIndex) {

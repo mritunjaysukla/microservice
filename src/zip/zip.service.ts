@@ -40,7 +40,6 @@ export class ZipService implements OnModuleInit, OnModuleDestroy {
   }
 
   onModuleInit() {
-    // Initialize worker thread pool
     const workerPath = path.resolve(__dirname, './workers/zip-worker.js');
     const tsWorkerPath = path.resolve(__dirname, './workers/zip-worker.ts');
 
@@ -74,12 +73,10 @@ export class ZipService implements OnModuleInit, OnModuleDestroy {
 
     this.logger.log(`Starting zip job ${jobId} for ${fileUrls.length} files`);
 
-    // Set response headers
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="${zipFileName || 'archive.zip'}"`);
 
     try {
-      // Process in worker thread for optimization
       const result = await this.piscina.run({
         fileUrls: fileUrls,
         zipFileName: zipFileName || 'archive.zip',
@@ -92,7 +89,6 @@ export class ZipService implements OnModuleInit, OnModuleDestroy {
 
       this.logger.log(`Zip created: ${result.filePath} (${this.formatFileSize(result.fileSize)})`);
 
-      // Stream the file directly to response
       const stats = fs.statSync(result.filePath);
       res.setHeader('Content-Length', stats.size.toString());
 
@@ -108,7 +104,6 @@ export class ZipService implements OnModuleInit, OnModuleDestroy {
         this.cleanupTempFile(result.filePath);
       });
 
-      // Start streaming
       readStream.pipe(res);
 
     } catch (error) {

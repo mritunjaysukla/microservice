@@ -18,9 +18,6 @@ interface ZipResult {
   totalCount: number;
 }
 
-/**
- * Fast zip worker with no compression for maximum speed
- */
 export default async function zipTask(params: ZipTaskParams): Promise<ZipResult> {
   const { fileUrls, zipFileName, jobId } = params;
   const startTime = Date.now();
@@ -35,7 +32,6 @@ export default async function zipTask(params: ZipTaskParams): Promise<ZipResult>
     const fileName = zipFileName || `archive-${uuidv4()}.zip`;
     const tempDir = path.resolve(__dirname, '../../tmp');
 
-    // Ensure temp directory exists
     if (!fs.existsSync(tempDir)) {
       fs.mkdirSync(tempDir, { recursive: true });
     }
@@ -43,15 +39,15 @@ export default async function zipTask(params: ZipTaskParams): Promise<ZipResult>
     const tempPath = path.join(tempDir, fileName);
     const output = createWriteStream(tempPath);
 
-    // Configure archiver with NO compression for maximum speed
     const archive = archiver('zip', {
-      zlib: { level: 0 }, // NO compression - store only
+      zlib: { level: 0 },
       forceLocalTime: true,
     });
 
     let isFinalized = false;
     let successCount = 0;
     let processedCount = 0;
+    let isCompleted = false;
 
     const cleanup = () => {
       if (fs.existsSync(tempPath)) {
@@ -64,7 +60,8 @@ export default async function zipTask(params: ZipTaskParams): Promise<ZipResult>
     };
 
     output.on('close', () => {
-      if (!isFinalized) {
+      if (!isCompleted) {
+        isCompleted = true;
         try {
           const stats = fs.statSync(tempPath);
           const processingTime = Date.now() - startTime;
@@ -88,28 +85,37 @@ export default async function zipTask(params: ZipTaskParams): Promise<ZipResult>
     output.on('error', (err) => {
       console.error(`[${jobId}] Output error:`, err);
       cleanup();
-      reject(err);
+      if (!isCompleted) {
+        isCompleted = true;
+        reject(err);
+      }
     });
 
     archive.on('error', (err) => {
       console.error(`[${jobId}] Archive error:`, err);
       cleanup();
-      reject(err);
+      if (!isCompleted) {
+        isCompleted = true;
+        reject(err);
+      }
     });
 
     archive.on('warning', (err) => {
       if (err.code === 'ENOENT') {
         console.warn(`[${jobId}] Warning:`, err.message);
       } else {
+        console.error(`[${jobId}] Archive critical warning:`, err);
         cleanup();
-        reject(err);
+        if (!isCompleted) {
+          isCompleted = true;
+          reject(err);
+        }
       }
     });
 
     archive.pipe(output);
 
     try {
-      // Process files in parallel batches for maximum speed
       const BATCH_SIZE = 5;
       const MAX_RETRIES = 2;
       const REQUEST_TIMEOUT = 30000;
@@ -128,7 +134,6 @@ export default async function zipTask(params: ZipTaskParams): Promise<ZipResult>
                 successCount++;
                 processedCount++;
 
-                // Log progress every 20 files
                 if (processedCount % 20 === 0 || processedCount === fileUrls.length) {
                   console.log(`[${jobId}] Progress: ${processedCount}/${fileUrls.length} files processed`);
                 }
@@ -146,7 +151,6 @@ export default async function zipTask(params: ZipTaskParams): Promise<ZipResult>
           })
         );
 
-        // Small delay between batches
         if (i + BATCH_SIZE < fileUrls.length) {
           await new Promise(resolve => setTimeout(resolve, 50));
         }
@@ -154,19 +158,48 @@ export default async function zipTask(params: ZipTaskParams): Promise<ZipResult>
 
       if (successCount === 0) {
         cleanup();
-        reject(new Error('No files were successfully processed'));
+        if (!isCompleted) {
+          isCompleted = true;
+          reject(new Error('No files were successfully processed'));
+        }
         return;
       }
 
       console.log(`[${jobId}] Processing complete: ${successCount}/${fileUrls.length} files`);
+      console.log(`[${jobId}] Finalizing archive...`);
+
+      const finalizeTimeout = setTimeout(() => {
+        if (!isCompleted) {
+          isCompleted = true;
+          console.error(`[${jobId}] Archive finalization timed out after 60 seconds`);
+          cleanup();
+          reject(new Error('Archive finalization timed out'));
+        }
+      }, 60000);
 
       isFinalized = true;
-      await archive.finalize();
+
+      try {
+        await archive.finalize();
+        clearTimeout(finalizeTimeout);
+        console.log(`[${jobId}] Archive finalized successfully`);
+      } catch (finalizeError) {
+        clearTimeout(finalizeTimeout);
+        if (!isCompleted) {
+          isCompleted = true;
+          console.error(`[${jobId}] Finalization error:`, finalizeError);
+          cleanup();
+          reject(finalizeError);
+        }
+      }
 
     } catch (err) {
       console.error(`[${jobId}] Processing error:`, err);
       cleanup();
-      reject(err);
+      if (!isCompleted) {
+        isCompleted = true;
+        reject(err);
+      }
     }
   });
 }
@@ -199,13 +232,22 @@ async function processFile(
   fileName = `${String(fileIndex + 1).padStart(3, '0')}_${fileName}`;
 
   const fileStream = response.data;
-  fileStream.on('error', (streamError: any) => {
-    throw new Error(`Stream error: ${streamError.message}`);
-  });
 
-  archive.append(fileStream, {
-    name: fileName,
-    date: new Date()
+  return new Promise((resolve, reject) => {
+    fileStream.on('error', (streamError: any) => {
+      reject(new Error(`Stream error: ${streamError.message}`));
+    });
+
+    try {
+      archive.append(fileStream, {
+        name: fileName,
+        date: new Date()
+      });
+
+      resolve();
+    } catch (appendError) {
+      reject(appendError);
+    }
   });
 }
 
@@ -229,7 +271,6 @@ function extractFileName(url: string, fallbackIndex: number): string {
 }
 
 function normalizeFileName(fileName: string): string {
-  // Handle HEIC and MOV extensions
   if (fileName.toLowerCase().endsWith('.heic')) {
     fileName = fileName.replace(/\.heic$/i, '.jpg');
   }
@@ -237,17 +278,14 @@ function normalizeFileName(fileName: string): string {
     fileName = fileName.replace(/\.mov$/i, '.mp4');
   }
 
-  // Sanitize filename
   fileName = fileName.replace(/[^\w\-_.]/g, '_');
 
-  // Ensure reasonable length
   if (fileName.length > 100) {
     const ext = path.extname(fileName);
     const base = path.basename(fileName, ext);
     fileName = base.substring(0, 100 - ext.length) + ext;
   }
 
-  // Ensure extension
   if (!path.extname(fileName)) {
     fileName += '.bin';
   }
@@ -264,3 +302,4 @@ function formatFileSize(bytes: number): string {
 }
 
 module.exports = zipTask;
+
