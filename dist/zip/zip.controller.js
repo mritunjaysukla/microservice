@@ -21,340 +21,160 @@ let ZipController = class ZipController {
     constructor(zipService) {
         this.zipService = zipService;
     }
-    async createZipJob(dto) {
-        if (!dto.fileUrls || dto.fileUrls.length === 0) {
-            throw new common_1.HttpException('No file URLs provided', common_1.HttpStatus.BAD_REQUEST);
-        }
-        if (dto.fileUrls.length > 100) {
-            throw new common_1.HttpException('Maximum 100 files allowed per zip job', common_1.HttpStatus.PAYLOAD_TOO_LARGE);
-        }
-        const jobId = await this.zipService.createZipJob(dto);
+    async createZip(dto, res) {
+        return this.zipService.archiveAndStreamZip(dto, res);
+    }
+    async getHealth() {
+        return this.zipService.getHealthStatus();
+    }
+    async getInfo() {
         return {
-            jobId,
-            message: 'Zip job created successfully',
-            estimatedTime: '2-5 minutes depending on file sizes'
+            name: 'Optimized Zip Microservice',
+            version: '2.0.0',
+            description: 'High-performance zip creation with worker threads and direct streaming',
+            features: [
+                'Single endpoint operation',
+                'Worker thread processing',
+                'Direct streaming',
+                'Memory optimized',
+                'Automatic file type conversion (HEIC→JPG, MOV→MP4)',
+                'Parallel downloads',
+                'Retry mechanism',
+                'Large file support'
+            ],
+            supportedFileTypes: [
+                'Images: jpg, png, gif, bmp, webp, heic',
+                'Videos: mp4, mov, avi, mkv, webm',
+                'Documents: pdf, doc, docx, txt, csv',
+                'Archives: zip, rar, tar, gz',
+                'And many more...'
+            ],
+            performance: {
+                maxConcurrentFiles: 'Unlimited',
+                processingMode: 'Parallel with worker threads',
+                memoryUsage: 'Optimized streaming',
+                responseTime: 'Immediate streaming start'
+            }
         };
-    }
-    async getJobStatus(jobId) {
-        const status = await this.zipService.getJobStatus(jobId);
-        if (status.status === 'not_found') {
-            throw new common_1.HttpException('Job not found', common_1.HttpStatus.NOT_FOUND);
-        }
-        return status;
-    }
-    async downloadZip(jobId, res, inline) {
-        await this.zipService.downloadZip(jobId, res, inline);
-    }
-    async listJobs(status, limit = 20) {
-        return await this.zipService.listJobs(status, limit);
-    }
-    async cancelJob(jobId) {
-        const result = await this.zipService.cancelJob(jobId);
-        return result;
-    }
-    async healthCheck() {
-        return await this.zipService.getHealthStatus();
     }
 };
 exports.ZipController = ZipController;
 __decorate([
-    (0, common_1.Post)('create-job'),
+    (0, common_1.Post)(),
     (0, swagger_1.ApiOperation)({
-        summary: 'Create asynchronous zip job',
-        description: 'Creates a background job to zip files from S3 presigned URLs. Returns job ID for tracking.'
+        summary: 'Create and download zip file (Optimized with Threading)',
+        description: `
+    🚀 **OPTIMIZED SINGLE-ENDPOINT ZIP SERVICE**
+    
+    This enhanced endpoint creates and streams zip files directly with:
+    - ✅ **Worker thread processing** for better performance
+    - ✅ **Direct streaming response** (no intermediate storage)
+    - ✅ **Memory-optimized** for large files
+    - ✅ **Automatic retry mechanism** for failed downloads
+    - ✅ **Support for all file types** including HEIC, MOV conversion
+    - ✅ **Parallel processing** of multiple files
+    
+    **How it works:**
+    1. Submit your request with file URLs and zip name
+    2. Processing starts immediately in background worker thread
+    3. Zip file streams directly to your browser for download
+    4. No polling or status checking required!
+    
+    **Perfect for:**
+    - Photo galleries and albums
+    - Document collections  
+    - Mixed media downloads
+    - Any batch file download needs
+    `
     }),
     (0, swagger_1.ApiBody)({
         type: zip_request_dto_1.ZipRequestDto,
-        description: 'Array of presigned S3 URLs and desired zip filename',
+        description: 'File URLs and desired zip filename',
         examples: {
-            example1: {
-                summary: 'Basic zip request',
+            photoGallery: {
+                summary: 'Photo Gallery',
                 value: {
                     fileUrls: [
-                        'https://s3-endpoint.com/bucket/file1.jpg?presigned-params',
-                        'https://s3-endpoint.com/bucket/file2.png?presigned-params'
+                        'https://cdn.fotosfolio.com/fotosfolioUser_f301238a-4df1-4047-bae3-7df9e7602a35/_67812103-a6f5-4d15-9c78-a895309735c1/sandesh_75554b06-7c51-4867-962b-e7db11cbe4e2/DSC03213_1749762059613.jpg?X-Amz-Algorithm=AWS4-HMAC-SHA256&...',
+                        'https://cdn.fotosfolio.com/fotosfolioUser_f301238a-4df1-4047-bae3-7df9e7602a35/_67812103-a6f5-4d15-9c78-a895309735c1/sandesh_75554b06-7c51-4867-962b-e7db11cbe4e2/DSC03451_1749762059646.jpg?X-Amz-Algorithm=AWS4-HMAC-SHA256&...'
                     ],
                     zipFileName: 'my-photos.zip'
                 }
-            }
-        }
-    }),
-    (0, swagger_1.ApiResponse)({
-        status: 202,
-        description: 'Zip job created successfully',
-        schema: {
-            type: 'object',
-            properties: {
-                jobId: {
-                    type: 'string',
-                    example: 'job-12345678-1234-1234-1234-123456789012'
-                },
-                message: {
-                    type: 'string',
-                    example: 'Zip job created successfully'
-                },
-                estimatedTime: {
-                    type: 'string',
-                    example: '2-5 minutes depending on file sizes'
+            },
+            mixedFiles: {
+                summary: 'Mixed File Types',
+                value: {
+                    fileUrls: [
+                        'https://example.com/document.pdf',
+                        'https://example.com/image.heic',
+                        'https://example.com/video.mov',
+                        'https://example.com/photo.jpg'
+                    ],
+                    zipFileName: 'mixed-collection.zip'
                 }
             }
         }
     }),
     (0, swagger_1.ApiResponse)({
-        status: 400,
-        description: 'Invalid request - empty file URLs or invalid data',
-        schema: {
-            type: 'object',
-            properties: {
-                statusCode: { type: 'number', example: 400 },
-                message: { type: 'string', example: 'No file URLs provided' },
-                error: { type: 'string', example: 'Bad Request' }
-            }
-        }
-    }),
-    (0, swagger_1.ApiResponse)({
-        status: 413,
-        description: 'Too many files - exceeds maximum limit',
-        schema: {
-            type: 'object',
-            properties: {
-                statusCode: { type: 'number', example: 413 },
-                message: { type: 'string', example: 'Maximum 100 files allowed per zip job' },
-                error: { type: 'string', example: 'Payload Too Large' }
-            }
-        }
-    }),
-    __param(0, (0, common_1.Body)()),
-    __metadata("design:type", Function),
-    __metadata("design:paramtypes", [zip_request_dto_1.ZipRequestDto]),
-    __metadata("design:returntype", Promise)
-], ZipController.prototype, "createZipJob", null);
-__decorate([
-    (0, common_1.Get)('status/:jobId'),
-    (0, swagger_1.ApiOperation)({
-        summary: 'Get zip job status',
-        description: 'Check the current status of a zip job. Use this to poll for completion.'
-    }),
-    (0, swagger_1.ApiParam)({
-        name: 'jobId',
-        description: 'Job ID returned from create-job endpoint',
-        example: 'job-12345678-1234-1234-1234-123456789012'
-    }),
-    (0, swagger_1.ApiResponse)({
         status: 200,
-        description: 'Job status retrieved successfully',
-        schema: {
-            oneOf: [
-                {
-                    title: 'Pending Job',
-                    type: 'object',
-                    properties: {
-                        status: { type: 'string', example: 'pending' },
-                        message: { type: 'string', example: 'Job is queued for processing' }
-                    }
-                },
-                {
-                    title: 'Processing Job',
-                    type: 'object',
-                    properties: {
-                        status: { type: 'string', example: 'processing' },
-                        message: { type: 'string', example: 'Files are being zipped' },
-                        progress: { type: 'string', example: '45% complete' }
-                    }
-                },
-                {
-                    title: 'Completed Job',
-                    type: 'object',
-                    properties: {
-                        status: { type: 'string', example: 'completed' },
-                        downloadUrl: { type: 'string', example: '/zip/download/job-123456' },
-                        fileSize: { type: 'string', example: '15.2 MB' },
-                        expiresAt: { type: 'string', example: '2024-12-25T10:00:00Z' }
-                    }
-                },
-                {
-                    title: 'Failed Job',
-                    type: 'object',
-                    properties: {
-                        status: { type: 'string', example: 'failed' },
-                        error: { type: 'string', example: 'Failed to access some files' },
-                        partialSuccess: { type: 'boolean', example: true },
-                        successCount: { type: 'number', example: 8 },
-                        totalCount: { type: 'number', example: 10 }
-                    }
-                }
-            ]
-        }
-    }),
-    (0, swagger_1.ApiResponse)({
-        status: 404,
-        description: 'Job not found',
-        schema: {
-            type: 'object',
-            properties: {
-                statusCode: { type: 'number', example: 404 },
-                message: { type: 'string', example: 'Job not found' },
-                error: { type: 'string', example: 'Not Found' }
-            }
-        }
-    }),
-    __param(0, (0, common_1.Param)('jobId')),
-    __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String]),
-    __metadata("design:returntype", Promise)
-], ZipController.prototype, "getJobStatus", null);
-__decorate([
-    (0, common_1.Get)('download/:jobId'),
-    (0, swagger_1.ApiOperation)({
-        summary: 'Download completed zip file',
-        description: 'Download the zip file once job is completed. File will be automatically deleted after download.'
-    }),
-    (0, swagger_1.ApiParam)({
-        name: 'jobId',
-        description: 'Job ID of completed zip job',
-        example: 'job-12345678-1234-1234-1234-123456789012'
-    }),
-    (0, swagger_1.ApiQuery)({
-        name: 'inline',
-        required: false,
-        description: 'Set to true to view file inline instead of download',
-        example: false
-    }),
-    (0, swagger_1.ApiResponse)({
-        status: 200,
-        description: 'Zip file download started',
+        description: '✅ Zip file created and streaming',
         headers: {
             'Content-Type': {
                 description: 'application/zip',
                 schema: { type: 'string' }
             },
             'Content-Disposition': {
-                description: 'attachment; filename="archive.zip"',
+                description: 'attachment; filename="your-file.zip"',
                 schema: { type: 'string' }
             }
         }
     }),
     (0, swagger_1.ApiResponse)({
-        status: 404,
-        description: 'Zip file not found or not ready',
+        status: 400,
+        description: '❌ Invalid request - empty URLs or invalid format',
         schema: {
             type: 'object',
             properties: {
-                statusCode: { type: 'number', example: 404 },
-                message: { type: 'string', example: 'Zip file not found or not ready' },
-                error: { type: 'string', example: 'Not Found' }
-            }
-        }
-    }),
-    (0, swagger_1.ApiResponse)({
-        status: 410,
-        description: 'Zip file has expired and been deleted',
-        schema: {
-            type: 'object',
-            properties: {
-                statusCode: { type: 'number', example: 410 },
-                message: { type: 'string', example: 'Zip file has expired. Please create a new job.' },
-                error: { type: 'string', example: 'Gone' }
-            }
-        }
-    }),
-    __param(0, (0, common_1.Param)('jobId')),
-    __param(1, (0, common_1.Res)()),
-    __param(2, (0, common_1.Query)('inline')),
-    __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String, Object, Boolean]),
-    __metadata("design:returntype", Promise)
-], ZipController.prototype, "downloadZip", null);
-__decorate([
-    (0, common_1.Get)('jobs'),
-    (0, swagger_1.ApiOperation)({
-        summary: 'List active zip jobs',
-        description: 'Get list of all active jobs (pending, processing) for monitoring'
-    }),
-    (0, swagger_1.ApiQuery)({
-        name: 'status',
-        required: false,
-        description: 'Filter jobs by status',
-        enum: ['pending', 'processing', 'completed', 'failed']
-    }),
-    (0, swagger_1.ApiQuery)({
-        name: 'limit',
-        required: false,
-        description: 'Maximum number of jobs to return',
-        example: 20
-    }),
-    (0, swagger_1.ApiResponse)({
-        status: 200,
-        description: 'List of jobs retrieved successfully',
-        schema: {
-            type: 'object',
-            properties: {
-                jobs: {
-                    type: 'array',
-                    items: {
-                        type: 'object',
-                        properties: {
-                            jobId: { type: 'string' },
-                            status: { type: 'string' },
-                            createdAt: { type: 'string' },
-                            fileCount: { type: 'number' },
-                            zipFileName: { type: 'string' }
-                        }
-                    }
+                statusCode: { type: 'number', example: 400 },
+                message: {
+                    type: 'string',
+                    examples: [
+                        'No file URLs provided',
+                        'No valid URLs provided',
+                        'Invalid URL format detected'
+                    ]
                 },
-                total: { type: 'number' }
+                error: { type: 'string', example: 'Bad Request' }
             }
         }
     }),
-    __param(0, (0, common_1.Query)('status')),
-    __param(1, (0, common_1.Query)('limit')),
-    __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String, Number]),
-    __metadata("design:returntype", Promise)
-], ZipController.prototype, "listJobs", null);
-__decorate([
-    (0, common_1.Post)('cancel/:jobId'),
-    (0, swagger_1.ApiOperation)({
-        summary: 'Cancel a pending or processing zip job',
-        description: 'Cancel a job that is still pending or processing'
-    }),
-    (0, swagger_1.ApiParam)({
-        name: 'jobId',
-        description: 'Job ID to cancel'
-    }),
     (0, swagger_1.ApiResponse)({
-        status: 200,
-        description: 'Job cancelled successfully',
+        status: 500,
+        description: '❌ Server error during zip creation',
         schema: {
             type: 'object',
             properties: {
-                message: { type: 'string', example: 'Job cancelled successfully' },
-                jobId: { type: 'string' }
+                error: { type: 'string', example: 'Failed to create zip file' },
+                message: { type: 'string', example: 'Worker thread encountered an error' },
+                jobId: { type: 'string', example: 'stream-12345678-1234-1234-1234-123456789012' }
             }
         }
     }),
-    (0, swagger_1.ApiResponse)({
-        status: 404,
-        description: 'Job not found'
-    }),
-    (0, swagger_1.ApiResponse)({
-        status: 409,
-        description: 'Job cannot be cancelled (already completed or failed)'
-    }),
-    __param(0, (0, common_1.Param)('jobId')),
+    __param(0, (0, common_1.Body)()),
+    __param(1, (0, common_1.Res)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String]),
+    __metadata("design:paramtypes", [zip_request_dto_1.ZipRequestDto, Object]),
     __metadata("design:returntype", Promise)
-], ZipController.prototype, "cancelJob", null);
+], ZipController.prototype, "createZip", null);
 __decorate([
     (0, common_1.Get)('health'),
     (0, swagger_1.ApiOperation)({
-        summary: 'Check service health',
-        description: 'Health check endpoint for monitoring service status and worker threads'
+        summary: 'Service health check',
+        description: 'Get current service status and performance metrics'
     }),
     (0, swagger_1.ApiResponse)({
         status: 200,
-        description: 'Service is healthy',
+        description: 'Service health information',
         schema: {
             type: 'object',
             properties: {
@@ -364,20 +184,80 @@ __decorate([
                     properties: {
                         active: { type: 'number', example: 2 },
                         total: { type: 'number', example: 4 },
-                        queue: { type: 'number', example: 1 }
+                        queue: { type: 'number', example: 0 }
                     }
                 },
-                redis: { type: 'string', example: 'connected' },
-                uptime: { type: 'string', example: '2h 34m' }
+                redis: {
+                    type: 'object',
+                    properties: {
+                        status: { type: 'string', example: 'connected' }
+                    }
+                },
+                mode: { type: 'string', example: 'streaming' },
+                features: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    example: ['worker-threads', 'direct-streaming', 'memory-optimized']
+                },
+                uptime: { type: 'string', example: '1d 5h 30m' },
+                memoryUsage: {
+                    type: 'object',
+                    properties: {
+                        rss: { type: 'string', example: '45.2 MB' },
+                        heapTotal: { type: 'string', example: '28.1 MB' },
+                        heapUsed: { type: 'string', example: '18.7 MB' },
+                        external: { type: 'string', example: '1.2 MB' }
+                    }
+                }
             }
         }
     }),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", []),
     __metadata("design:returntype", Promise)
-], ZipController.prototype, "healthCheck", null);
+], ZipController.prototype, "getHealth", null);
+__decorate([
+    (0, common_1.Get)('info'),
+    (0, swagger_1.ApiOperation)({
+        summary: 'API information',
+        description: 'Get information about the zip service capabilities'
+    }),
+    (0, swagger_1.ApiResponse)({
+        status: 200,
+        description: 'API information',
+        schema: {
+            type: 'object',
+            properties: {
+                name: { type: 'string', example: 'Optimized Zip Microservice' },
+                version: { type: 'string', example: '2.0.0' },
+                description: { type: 'string', example: 'High-performance zip creation with worker threads' },
+                features: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    example: [
+                        'Single endpoint operation',
+                        'Worker thread processing',
+                        'Direct streaming',
+                        'Memory optimized',
+                        'Automatic file type conversion',
+                        'Parallel downloads',
+                        'Retry mechanism'
+                    ]
+                },
+                supportedFileTypes: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    example: ['jpg', 'png', 'heic', 'mov', 'mp4', 'pdf, doc, docx, txt, csv', 'zip, rar, tar, gz', 'And many more...']
+                }
+            }
+        }
+    }),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", []),
+    __metadata("design:returntype", Promise)
+], ZipController.prototype, "getInfo", null);
 exports.ZipController = ZipController = __decorate([
-    (0, swagger_1.ApiTags)('Zip Operations'),
+    (0, swagger_1.ApiTags)('Zip'),
     (0, common_1.Controller)('zip'),
     __metadata("design:paramtypes", [zip_service_1.ZipService])
 ], ZipController);
