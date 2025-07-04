@@ -1,0 +1,50 @@
+<<<<<<< HEAD
+=======
+"use strict";
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var __metadata = (this && this.__metadata) || function (k, v) {
+    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};
+var __param = (this && this.__param) || function (paramIndex, decorator) {
+    return function (target, key) { decorator(target, key, paramIndex); }
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.ZipController = void 0;
+const common_1 = require("@nestjs/common");
+const zip_service_1 = require("./zip.service");
+const zip_request_dto_1 = require("./dto/zip-request.dto");
+const swagger_1 = require("@nestjs/swagger");
+let ZipController = class ZipController {
+    constructor(zipService) {
+        this.zipService = zipService;
+    }
+    async createZip(dto, res) {
+        return this.zipService.archiveAndStreamZip(dto, res);
+    }
+};
+exports.ZipController = ZipController;
+__decorate([
+    (0, common_1.Post)(),
+    (0, swagger_1.ApiOperation)({ summary: 'Create and download zip from file URLs' }),
+    (0, swagger_1.ApiBody)({ type: zip_request_dto_1.ZipRequestDto }),
+    (0, swagger_1.ApiResponse)({ status: 200, description: 'Zip file streamed successfully' }),
+    (0, swagger_1.ApiResponse)({ status: 400, description: 'Bad Request' }),
+    (0, swagger_1.ApiResponse)({ status: 500, description: 'Server Error' }),
+    __param(0, (0, common_1.Body)()),
+    __param(1, (0, common_1.Res)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [zip_request_dto_1.ZipRequestDto, Object]),
+    __metadata("design:returntype", Promise)
+], ZipController.prototype, "createZip", null);
+exports.ZipController = ZipController = __decorate([
+    (0, swagger_1.ApiTags)('Zip'),
+    (0, common_1.Controller)('zip'),
+    __metadata("design:paramtypes", [zip_service_1.ZipService])
+], ZipController);
+//# sourceMappingURL=zip.controller.js.map
+>>>>>>> 433c548 (feat: Add Swagger documentation to zip controller)
