@@ -8,39 +8,36 @@ cursor=0
 fileUrls=()
 
 while :; do
-  # Run SCAN command remotely and parse output
-  # Format: first line = new cursor, following lines = keys
-  result=$(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" SCAN "$cursor" MATCH "presigned-url:*")
-  
-  # Get new cursor (first line)
-  cursor=$(echo "$result" | head -n1)
-  
-  # Get keys (from second line)
-  keys=$(echo "$result" | tail -n +2)
+  # SCAN Redis keys with match pattern
+  mapfile -t result < <(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" SCAN "$cursor" MATCH "presigned-url:*")
 
-  # For each key, get value
-  for key in $keys; do
-    # Get value of the key
+  cursor="${result[0]}"
+
+  # From index 1 onward are keys
+  for ((i=1; i<${#result[@]}; i++)); do
+    key="${result[i]}"
+    # Get value of key (already JSON quoted string)
     url=$(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" GET "$key")
+
     if [[ -n "$url" ]]; then
       fileUrls+=("$url")
     fi
   done
 
-  # If cursor is 0, done scanning
-  if [[ "$cursor" == "0" ]]; then
-    break
-  fi
+  [[ "$cursor" == "0" ]] && break
 done
 
-# Join array with commas
-fileUrlsJson=$(printf ", %s" "${fileUrls[@]}")
-fileUrlsJson="[${fileUrlsJson:2}]"
+# Join the already quoted URLs with commas, wrap in []
+json_urls="["
+for url in "${fileUrls[@]}"; do
+  json_urls+="$url,"
+done
+json_urls="${json_urls%,}]"  # remove trailing comma, add closing bracket
 
-# Output JSON file
+# Write JSON file
 cat <<EOF > zip-request-dto.json
 {
-  "fileUrls": $fileUrlsJson,
+  "fileUrls": $json_urls,
   "zipFileName": "my-archive.zip"
 }
 EOF
