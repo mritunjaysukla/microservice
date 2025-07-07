@@ -8,15 +8,21 @@ var __decorate = (this && this.__decorate) || function (decorators, target, key,
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ZipModule = void 0;
 const common_1 = require("@nestjs/common");
+const cache_manager_1 = require("@nestjs/cache-manager");
 const zip_controller_1 = require("./zip.controller");
-const zip_service_1 = require("./zip.service");
+const enhanced_zip_service_1 = require("./enhanced-zip.service");
+const datahub_module_1 = require("./datahub/datahub.module");
 let ZipModule = class ZipModule {
 };
 exports.ZipModule = ZipModule;
 exports.ZipModule = ZipModule = __decorate([
     (0, common_1.Module)({
+        imports: [
+            cache_manager_1.CacheModule.register(),
+            (0, common_1.forwardRef)(() => datahub_module_1.DatahubModule),
+        ],
         controllers: [zip_controller_1.ZipController],
-        providers: [zip_service_1.ZipService],
+        providers: [enhanced_zip_service_1.EnhancedZipService],
     })
 ], ZipModule);
 //# sourceMappingURL=zip.module.js.map

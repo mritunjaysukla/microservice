@@ -11,6 +11,7 @@ export declare class DatahubService {
     private readonly cacheManager;
     private readonly logger;
     private s3;
+    CONCURRENCY_LIMIT: number;
     constructor(cacheManager: Cache);
     uploadFile(folderPath: string, file: MulterFile): Promise<{
         fileName: string;
@@ -21,7 +22,6 @@ export declare class DatahubService {
     deleteFile(fileName: string): Promise<void>;
     listAllObjectsInBucket(): Promise<string[]>;
     deleteBucket(): Promise<void>;
-    CONCURRENCY_LIMIT: number;
     generatePresignedUrlForUpload(fileName: string, contentType: string): Promise<string>;
     generateMultiplePresignedUrlsForUpload(files: {
         fileName: string;

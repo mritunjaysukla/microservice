@@ -1,14 +1,30 @@
-import * as archiver from 'archiver';
+import archiver from 'archiver';
 import * as fs from 'fs';
-import axios from 'axios';
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import { createWriteStream } from 'fs';
+import { Readable } from 'stream';
 import { v4 as uuidv4 } from 'uuid';
 import * as path from 'path';
-import { createWriteStream } from 'fs';
+import pLimit from 'p-limit';
 
 interface ZipTaskParams {
-  fileUrls: string[];
+  files: {
+    key: string;
+    size: number;
+    originalName?: string;
+  }[];
+  s3Config: {
+    region: string;
+    endpoint: string;
+    accessKey: string;
+    secretKey: string;
+    bucket: string;
+  };
   zipFileName?: string;
-  jobId?: string;
+  jobId: string;
+  chunkIndex?: number;
+  totalChunks?: number;
+  maxConcurrentDownloads: number;
 }
 
 interface ZipResult {
@@ -16,38 +32,50 @@ interface ZipResult {
   fileSize: number;
   successCount: number;
   totalCount: number;
+  chunkIndex?: number;
 }
 
-export default async function zipTask(params: ZipTaskParams): Promise<ZipResult> {
-  const { fileUrls, zipFileName, jobId } = params;
+export default async function enhancedZipTask(params: ZipTaskParams): Promise<ZipResult> {
+  const {
+    files,
+    s3Config,
+    zipFileName,
+    jobId,
+    chunkIndex,
+    totalChunks,
+    maxConcurrentDownloads,
+  } = params;
+
+  const s3Client = new S3Client({
+    region: s3Config.region,
+    endpoint: s3Config.endpoint,
+    credentials: {
+      accessKeyId: s3Config.accessKey,
+      secretAccessKey: s3Config.secretKey,
+    },
+    forcePathStyle: true,
+  });
+
   const startTime = Date.now();
-
-  if (!fileUrls || fileUrls.length === 0) {
-    throw new Error('No file URLs provided');
-  }
-
-  console.log(`[${jobId}] Starting zip processing for ${fileUrls.length} files`);
+  console.log(`[${jobId}] Starting zip processing for ${files.length} files${chunkIndex !== undefined ? ` (chunk ${chunkIndex + 1}/${totalChunks})` : ''}`);
 
   return new Promise(async (resolve, reject) => {
     const fileName = zipFileName || `archive-${uuidv4()}.zip`;
-    const tempDir = path.resolve(__dirname, '../../tmp');
+    const tempDir = path.resolve(__dirname, '../../../tmp');
 
     if (!fs.existsSync(tempDir)) {
       fs.mkdirSync(tempDir, { recursive: true });
     }
 
-    const tempPath = path.join(tempDir, fileName);
+    const tempPath = path.join(tempDir, chunkIndex !== undefined ? `${chunkIndex}-${fileName}` : fileName);
     const output = createWriteStream(tempPath);
+    let isCompleted = false;
+    let successCount = 0;
 
     const archive = archiver('zip', {
-      zlib: { level: 0 },
+      zlib: { level: 0 }, // Fastest compression
       forceLocalTime: true,
     });
-
-    let isFinalized = false;
-    let successCount = 0;
-    let processedCount = 0;
-    let isCompleted = false;
 
     const cleanup = () => {
       if (fs.existsSync(tempPath)) {
@@ -67,13 +95,14 @@ export default async function zipTask(params: ZipTaskParams): Promise<ZipResult>
           const processingTime = Date.now() - startTime;
 
           console.log(`[${jobId}] Zip created: ${tempPath} (${formatFileSize(stats.size)}) in ${(processingTime / 1000).toFixed(1)}s`);
-          console.log(`[${jobId}] Files: ${successCount}/${fileUrls.length} successful`);
+          console.log(`[${jobId}] Files: ${successCount}/${files.length} successful`);
 
           resolve({
             filePath: tempPath,
             fileSize: stats.size,
             successCount,
-            totalCount: fileUrls.length,
+            totalCount: files.length,
+            chunkIndex,
           });
         } catch (error) {
           cleanup();
@@ -116,45 +145,55 @@ export default async function zipTask(params: ZipTaskParams): Promise<ZipResult>
     archive.pipe(output);
 
     try {
-      const BATCH_SIZE = 5;
-      const MAX_RETRIES = 2;
-      const REQUEST_TIMEOUT = 30000;
+      const limit = pLimit(maxConcurrentDownloads);
+      const processFile = async (file: typeof files[0], index: number) => {
+        const retries = 2;
+        let attempt = 0;
 
-      for (let i = 0; i < fileUrls.length; i += BATCH_SIZE) {
-        const batch = fileUrls.slice(i, i + BATCH_SIZE);
-
-        await Promise.allSettled(
-          batch.map(async (fileUrl, batchIndex) => {
-            const fileIndex = i + batchIndex;
-            let attempts = 0;
-
-            while (attempts < MAX_RETRIES) {
-              try {
-                await processFile(fileUrl, fileIndex, archive, REQUEST_TIMEOUT);
-                successCount++;
-                processedCount++;
-
-                if (processedCount % 20 === 0 || processedCount === fileUrls.length) {
-                  console.log(`[${jobId}] Progress: ${processedCount}/${fileUrls.length} files processed`);
-                }
-
-                return;
-              } catch (error) {
-                attempts++;
-                if (attempts >= MAX_RETRIES) {
-                  console.error(`[${jobId}] File ${fileIndex + 1} failed:`, error.message);
-                }
-              }
+        while (attempt < retries) {
+          try {
+            const s3Obj = await s3Client.send(
+              new GetObjectCommand({
+                Bucket: s3Config.bucket,
+                Key: file.key,
+              })
+            );
+            const bodyStream = s3Obj.Body as Readable;
+            if (!bodyStream || typeof bodyStream.pipe !== 'function') {
+              throw new Error('Invalid S3 stream');
             }
 
-            processedCount++;
-          })
-        );
+            const fileName = normalizeFileName(file.originalName || path.basename(file.key), index);
 
-        if (i + BATCH_SIZE < fileUrls.length) {
-          await new Promise(resolve => setTimeout(resolve, 50));
+            await new Promise<void>((resolveFile, rejectFile) => {
+              archive.append(bodyStream, {
+                name: fileName,
+                date: new Date(),
+                size: file.size,
+              } as any);
+
+              bodyStream.once('end', () => resolveFile());
+              bodyStream.once('error', (err) => rejectFile(err));
+            });
+
+            successCount++;
+            if (successCount % 10 === 0 || successCount === files.length) {
+              console.log(`[${jobId}] Progress: ${successCount}/${files.length} files processed`);
+            }
+
+            return;
+          } catch (error) {
+            attempt++;
+            if (attempt >= retries) {
+              console.error(`[${jobId}] File ${index + 1} failed after ${retries} attempts:`, error.message);
+            } else {
+              await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+            }
+          }
         }
-      }
+      };
+
+      await Promise.all(files.map((file, index) => limit(() => processFile(file, index))));
 
       if (successCount === 0) {
         cleanup();
@@ -165,7 +204,7 @@ export default async function zipTask(params: ZipTaskParams): Promise<ZipResult>
         return;
       }
 
-      console.log(`[${jobId}] Processing complete: ${successCount}/${fileUrls.length} files`);
+      console.log(`[${jobId}] Processing complete: ${successCount}/${files.length} files`);
       console.log(`[${jobId}] Finalizing archive...`);
 
       const finalizeTimeout = setTimeout(() => {
@@ -176,8 +215,6 @@ export default async function zipTask(params: ZipTaskParams): Promise<ZipResult>
           reject(new Error('Archive finalization timed out'));
         }
       }, 60000);
-
-      isFinalized = true;
 
       try {
         await archive.finalize();
@@ -204,73 +241,9 @@ export default async function zipTask(params: ZipTaskParams): Promise<ZipResult>
   });
 }
 
-async function processFile(
-  fileUrl: string,
-  fileIndex: number,
-  archive: archiver.Archiver,
-  timeout: number = 30000
-): Promise<void> {
-  const decodedUrl = decodeURIComponent(fileUrl);
+function normalizeFileName(fileName: string, index: number): string {
+  fileName = fileName || `file-${index + 1}`;
 
-  const response = await axios.get(decodedUrl, {
-    responseType: 'stream',
-    timeout,
-    maxContentLength: Infinity,
-    maxBodyLength: Infinity,
-    headers: {
-      'User-Agent': 'ZipService/1.0',
-      'Accept': '*/*',
-    },
-  });
-
-  if (response.status !== 200) {
-    throw new Error(`HTTP ${response.status}`);
-  }
-
-  let fileName = extractFileName(decodedUrl, fileIndex);
-  fileName = normalizeFileName(fileName);
-  fileName = `${String(fileIndex + 1).padStart(3, '0')}_${fileName}`;
-
-  const fileStream = response.data;
-
-  return new Promise((resolve, reject) => {
-    fileStream.on('error', (streamError: any) => {
-      reject(new Error(`Stream error: ${streamError.message}`));
-    });
-
-    try {
-      archive.append(fileStream, {
-        name: fileName,
-        date: new Date()
-      });
-
-      resolve();
-    } catch (appendError) {
-      reject(appendError);
-    }
-  });
-}
-
-function extractFileName(url: string, fallbackIndex: number): string {
-  try {
-    const urlPath = new URL(url).pathname;
-    const pathSegments = urlPath.split('/').filter(segment => segment.length > 0);
-
-    if (pathSegments.length > 0) {
-      const lastSegment = pathSegments[pathSegments.length - 1];
-      const cleanName = lastSegment.split('?')[0];
-      if (cleanName && cleanName.length > 0) {
-        return cleanName;
-      }
-    }
-  } catch (error) {
-    // Ignore error, use fallback
-  }
-
-  return `file-${fallbackIndex + 1}`;
-}
-
-function normalizeFileName(fileName: string): string {
   if (fileName.toLowerCase().endsWith('.heic')) {
     fileName = fileName.replace(/\.heic$/i, '.jpg');
   }
@@ -290,7 +263,7 @@ function normalizeFileName(fileName: string): string {
     fileName += '.bin';
   }
 
-  return fileName;
+  return `${String(index + 1).padStart(3, '0')}_${fileName}`;
 }
 
 function formatFileSize(bytes: number): string {
@@ -301,4 +274,4 @@ function formatFileSize(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
-module.exports = zipTask;
+module.exports = enhancedZipTask;

@@ -8,23 +8,27 @@ var __decorate = (this && this.__decorate) || function (decorators, target, key,
 var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 var ZipCleanupCron_1;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ZipCleanupCron = void 0;
 const common_1 = require("@nestjs/common");
 const schedule_1 = require("@nestjs/schedule");
-const aws_sdk_1 = require("aws-sdk");
-const ioredis_1 = require("ioredis");
+const client_s3_1 = require("@aws-sdk/client-s3");
+const ioredis_1 = __importDefault(require("ioredis"));
 let ZipCleanupCron = ZipCleanupCron_1 = class ZipCleanupCron {
     constructor() {
         this.logger = new common_1.Logger(ZipCleanupCron_1.name);
-        this.s3 = new aws_sdk_1.S3({
-            accessKeyId: process.env.S3_ACCESS_KEY,
-            secretAccessKey: process.env.S3_SECRET_KEY,
+        this.s3 = new client_s3_1.S3Client({
             region: process.env.S3_REGION,
             endpoint: process.env.S3_ENDPOINT,
-            s3ForcePathStyle: true,
-            signatureVersion: 'v4',
+            credentials: {
+                accessKeyId: process.env.S3_ACCESS_KEY,
+                secretAccessKey: process.env.S3_SECRET_KEY,
+            },
+            forcePathStyle: true,
         });
         this.redis = new ioredis_1.default({
             host: process.env.REDIS_HOST || 'localhost',
@@ -34,22 +38,23 @@ let ZipCleanupCron = ZipCleanupCron_1 = class ZipCleanupCron {
     async handleCleanup() {
         const bucket = process.env.S3_BUCKET_NAME || '';
         try {
-            const { Contents } = await this.s3
-                .listObjectsV2({ Bucket: bucket, Prefix: 'zips/' })
-                .promise();
+            const listCmd = new client_s3_1.ListObjectsV2Command({
+                Bucket: bucket,
+                Prefix: 'zips/',
+            });
+            const { Contents } = await this.s3.send(listCmd);
             const expired = Contents?.filter((f) => {
                 const age = Date.now() - new Date(f.LastModified).getTime();
                 return age > 6 * 60 * 60 * 1000;
             });
             if (expired?.length) {
-                await this.s3
-                    .deleteObjects({
+                const deleteCmd = new client_s3_1.DeleteObjectsCommand({
                     Bucket: bucket,
                     Delete: {
                         Objects: expired.map((f) => ({ Key: f.Key })),
                     },
-                })
-                    .promise();
+                });
+                await this.s3.send(deleteCmd);
                 this.logger.log(`Deleted ${expired.length} expired ZIPs`);
             }
             const keys = await this.redis.keys('zip:*');
