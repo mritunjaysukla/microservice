@@ -1,4 +1,3 @@
-// src/cron/zip-cleanup.cron.ts
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import {
@@ -7,6 +6,13 @@ import {
   DeleteObjectsCommand,
 } from '@aws-sdk/client-s3';
 import Redis from 'ioredis';
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  if (error && typeof error === 'object' && 'message' in error) return String((error as any).message);
+  return 'Unknown error occurred';
+}
 
 @Injectable()
 export class ZipCleanupCron {
@@ -19,8 +25,8 @@ export class ZipCleanupCron {
       region: process.env.S3_REGION,
       endpoint: process.env.S3_ENDPOINT,
       credentials: {
-        accessKeyId: process.env.S3_ACCESS_KEY,
-        secretAccessKey: process.env.S3_SECRET_KEY,
+        accessKeyId: process.env.S3_ACCESS_KEY!,
+        secretAccessKey: process.env.S3_SECRET_KEY!,
       },
       forcePathStyle: true,
     });
@@ -65,7 +71,7 @@ export class ZipCleanupCron {
         this.logger.log(`Deleted ${keys.length} Redis cache keys`);
       }
     } catch (err) {
-      this.logger.error(`Cron cleanup failed: ${err.message}`);
+      this.logger.error(`Cron cleanup failed: ${getErrorMessage(err)}`);
     }
   }
 }

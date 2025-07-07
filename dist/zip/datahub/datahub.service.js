@@ -22,6 +22,15 @@ const common_1 = require("@nestjs/common");
 const p_limit_1 = __importDefault(require("p-limit"));
 const client_s3_1 = require("@aws-sdk/client-s3");
 const s3_request_presigner_1 = require("@aws-sdk/s3-request-presigner");
+function getErrorMessage(error) {
+    if (error instanceof Error)
+        return error.message;
+    if (typeof error === 'string')
+        return error;
+    if (error && typeof error === 'object' && 'message' in error)
+        return String(error.message);
+    return 'Unknown error occurred';
+}
 let DatahubService = DatahubService_1 = class DatahubService {
     constructor(cacheManager) {
         this.cacheManager = cacheManager;
@@ -38,9 +47,7 @@ let DatahubService = DatahubService_1 = class DatahubService {
         });
     }
     async uploadFile(folderPath, file) {
-        const sanitizeFileName = (name) => {
-            return name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
-        };
+        const sanitizeFileName = (name) => name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
         const safeFileName = `${Date.now()}_${sanitizeFileName(file.originalname)}`;
         const folder = `${folderPath}/${safeFileName}`;
         const params = {
@@ -56,12 +63,12 @@ let DatahubService = DatahubService_1 = class DatahubService {
             const downloadUrl = `${process.env.S3_ENDPOINT}/${process.env.S3_BUCKET_NAME}/${folder}`;
             return {
                 fileName: safeFileName,
-                downloadUrl: downloadUrl,
+                downloadUrl,
                 message: 'File uploaded successfully',
             };
         }
         catch (error) {
-            this.logger.error(`Failed to upload file to S3: ${error.message}`);
+            this.logger.error(`Failed to upload file to S3: ${getErrorMessage(error)}`);
             throw new Error('File upload failed');
         }
     }
@@ -73,11 +80,10 @@ let DatahubService = DatahubService_1 = class DatahubService {
             ContentType: 'image/jpeg',
         });
         try {
-            const url = await (0, s3_request_presigner_1.getSignedUrl)(this.s3, command, { expiresIn: 60 });
-            return url;
+            return await (0, s3_request_presigner_1.getSignedUrl)(this.s3, command, { expiresIn: 60 });
         }
         catch (error) {
-            this.logger.error(`Error generating presigned URL: ${error.message}`);
+            this.logger.error(`Error generating presigned URL: ${getErrorMessage(error)}`);
             throw new Error('Failed to generate presigned URL');
         }
     }
@@ -92,7 +98,7 @@ let DatahubService = DatahubService_1 = class DatahubService {
             this.logger.log(`File deleted successfully: ${fileName}`);
         }
         catch (error) {
-            this.logger.error(`Failed to delete file from S3: ${error.message}`);
+            this.logger.error(`Failed to delete file from S3: ${getErrorMessage(error)}`);
             throw new Error('File deletion failed');
         }
     }
@@ -117,7 +123,7 @@ let DatahubService = DatahubService_1 = class DatahubService {
             return allKeys;
         }
         catch (error) {
-            this.logger.error(`Error listing objects in the bucket: ${error.message}`);
+            this.logger.error(`Error listing objects in the bucket: ${getErrorMessage(error)}`);
             throw new Error('Failed to list objects');
         }
     }
@@ -211,7 +217,7 @@ let DatahubService = DatahubService_1 = class DatahubService {
             this.logger.log(`Bucket ${bucketName} deleted successfully.`);
         }
         catch (error) {
-            this.logger.error(`Failed to delete bucket ${bucketName}: ${error.message}`);
+            this.logger.error(`Failed to delete bucket ${bucketName}: ${getErrorMessage(error)}`);
             throw new Error('Bucket deletion failed');
         }
     }
@@ -222,11 +228,10 @@ let DatahubService = DatahubService_1 = class DatahubService {
             ContentType: contentType,
         });
         try {
-            const url = await (0, s3_request_presigner_1.getSignedUrl)(this.s3, command, { expiresIn: 3600 });
-            return url;
+            return await (0, s3_request_presigner_1.getSignedUrl)(this.s3, command, { expiresIn: 3600 });
         }
         catch (error) {
-            this.logger.error(`Failed to generate presigned URL: ${error.message}`);
+            this.logger.error(`Failed to generate presigned URL: ${getErrorMessage(error)}`);
             throw new Error('Failed to generate presigned URL');
         }
     }
@@ -239,7 +244,7 @@ let DatahubService = DatahubService_1 = class DatahubService {
         const cacheKey = `presigned-url:${fileName}`;
         const cachedUrl = await this.cacheManager.get(cacheKey);
         if (cachedUrl) {
-            console.log('from cache');
+            this.logger.log(`Get presigned URL cache hit for ${fileName}`);
             return cachedUrl;
         }
         const command = new client_s3_1.GetObjectCommand({
@@ -253,7 +258,7 @@ let DatahubService = DatahubService_1 = class DatahubService {
             return modifiedUrl;
         }
         catch (error) {
-            throw new Error(`Failed to generate pre-signed URL: ${error.message}`);
+            throw new Error(`Failed to generate pre-signed URL: ${getErrorMessage(error)}`);
         }
     }
 };

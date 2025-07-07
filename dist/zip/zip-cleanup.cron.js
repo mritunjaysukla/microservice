@@ -18,6 +18,15 @@ const common_1 = require("@nestjs/common");
 const schedule_1 = require("@nestjs/schedule");
 const client_s3_1 = require("@aws-sdk/client-s3");
 const ioredis_1 = __importDefault(require("ioredis"));
+function getErrorMessage(error) {
+    if (error instanceof Error)
+        return error.message;
+    if (typeof error === 'string')
+        return error;
+    if (error && typeof error === 'object' && 'message' in error)
+        return String(error.message);
+    return 'Unknown error occurred';
+}
 let ZipCleanupCron = ZipCleanupCron_1 = class ZipCleanupCron {
     constructor() {
         this.logger = new common_1.Logger(ZipCleanupCron_1.name);
@@ -64,7 +73,7 @@ let ZipCleanupCron = ZipCleanupCron_1 = class ZipCleanupCron {
             }
         }
         catch (err) {
-            this.logger.error(`Cron cleanup failed: ${err.message}`);
+            this.logger.error(`Cron cleanup failed: ${getErrorMessage(err)}`);
         }
     }
 };

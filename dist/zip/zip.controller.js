@@ -16,7 +16,6 @@ exports.ZipController = void 0;
 const common_1 = require("@nestjs/common");
 const enhanced_zip_service_1 = require("./enhanced-zip.service");
 const zip_request_dto_1 = require("./dto/zip-request.dto");
-const passport_1 = require("@nestjs/passport");
 let ZipController = class ZipController {
     constructor(zipService) {
         this.zipService = zipService;
@@ -37,7 +36,6 @@ __decorate([
 ], ZipController.prototype, "createZip", null);
 exports.ZipController = ZipController = __decorate([
     (0, common_1.Controller)('zip'),
-    (0, common_1.UseGuards)((0, passport_1.AuthGuard)('jwt')),
     __metadata("design:paramtypes", [enhanced_zip_service_1.EnhancedZipService])
 ], ZipController);
 //# sourceMappingURL=zip.controller.js.map

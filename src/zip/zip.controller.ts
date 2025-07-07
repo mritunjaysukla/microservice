@@ -3,7 +3,6 @@ import {
   Post,
   Body,
   Res,
-  UseGuards,
   Request,
 } from '@nestjs/common';
 import { Response } from 'express';
@@ -12,7 +11,6 @@ import { ZipRequestDto } from './dto/zip-request.dto';
 import { AuthGuard } from '@nestjs/passport';
 
 @Controller('zip')
-@UseGuards(AuthGuard('jwt'))
 export class ZipController {
   constructor(private readonly zipService: EnhancedZipService) { }
 

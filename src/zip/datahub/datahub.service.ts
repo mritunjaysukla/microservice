@@ -27,6 +27,13 @@ import {
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  if (error && typeof error === 'object' && 'message' in error) return String((error as any).message);
+  return 'Unknown error occurred';
+}
+
 interface MulterFile {
   fieldname: string;
   originalname: string;
@@ -54,11 +61,8 @@ export class DatahubService {
     });
   }
 
-  // Upload file to S3
   async uploadFile(folderPath: string, file: MulterFile) {
-    const sanitizeFileName = (name: string) => {
-      return name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
-    };
+    const sanitizeFileName = (name: string) => name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
 
     const safeFileName = `${Date.now()}_${sanitizeFileName(file.originalname)}`;
     const folder = `${folderPath}/${safeFileName}`;
@@ -68,7 +72,6 @@ export class DatahubService {
       Key: folder,
       Body: file.buffer,
       ContentType: file.mimetype,
-      // ACL: 'public-read',
     };
 
     try {
@@ -80,30 +83,27 @@ export class DatahubService {
 
       return {
         fileName: safeFileName,
-        downloadUrl: downloadUrl,
+        downloadUrl,
         message: 'File uploaded successfully',
       };
-    } catch (error: any) {
-      this.logger.error(`Failed to upload file to S3: ${error.message}`);
+    } catch (error) {
+      this.logger.error(`Failed to upload file to S3: ${getErrorMessage(error)}`);
       throw new Error('File upload failed');
     }
   }
 
-  // Generate presigned URL for direct upload to S3
   async generatePresignedUrl(userId: string, fileName: string) {
     const key = `${userId}/${fileName}`;
     const command = new PutObjectCommand({
       Bucket: process.env.S3_BUCKET_NAME,
       Key: key,
-      ContentType: 'image/jpeg', // Change content type based on your needs
-      // ACL: 'public-read',
+      ContentType: 'image/jpeg',
     });
 
     try {
-      const url = await getSignedUrl(this.s3, command, { expiresIn: 60 });
-      return url;
-    } catch (error: any) {
-      this.logger.error(`Error generating presigned URL: ${error.message}`);
+      return await getSignedUrl(this.s3, command, { expiresIn: 60 });
+    } catch (error) {
+      this.logger.error(`Error generating presigned URL: ${getErrorMessage(error)}`);
       throw new Error('Failed to generate presigned URL');
     }
   }
@@ -119,13 +119,11 @@ export class DatahubService {
     try {
       await this.s3.send(command);
       this.logger.log(`File deleted successfully: ${fileName}`);
-    } catch (error: any) {
-      this.logger.error(`Failed to delete file from S3: ${error.message}`);
+    } catch (error) {
+      this.logger.error(`Failed to delete file from S3: ${getErrorMessage(error)}`);
       throw new Error('File deletion failed');
     }
   }
-
-  // Add this method inside your DatahubService class
 
   async listAllObjectsInBucket(): Promise<string[]> {
     const allKeys: string[] = [];
@@ -147,11 +145,9 @@ export class DatahubService {
         continuationToken = result.NextContinuationToken;
       } while (continuationToken);
 
-      return allKeys; // Return the list of object keys (filenames)
-    } catch (error: any) {
-      this.logger.error(
-        `Error listing objects in the bucket: ${error.message}`,
-      );
+      return allKeys;
+    } catch (error) {
+      this.logger.error(`Error listing objects in the bucket: ${getErrorMessage(error)}`);
       throw new Error('Failed to list objects');
     }
   }
@@ -159,7 +155,7 @@ export class DatahubService {
   async deleteBucket(): Promise<void> {
     const bucketName = process.env.S3_BUCKET_NAME || '';
     try {
-      // Step 1: Delete all object versions if versioning is enabled
+      // Delete object versions
       let isTruncated = true;
       let versionIdMarker: string | undefined = undefined;
 
@@ -192,7 +188,7 @@ export class DatahubService {
         }
       }
 
-      // Step 2: Abort all multipart uploads if any
+      // Abort multipart uploads
       isTruncated = true;
       let keyMarker: string | undefined = undefined;
 
@@ -222,7 +218,7 @@ export class DatahubService {
         }
       }
 
-      // Step 3: Delete all objects in the bucket
+      // Delete all objects
       isTruncated = true;
       let continuationToken: string | undefined = undefined;
 
@@ -254,43 +250,34 @@ export class DatahubService {
         }
       }
 
-      // Step 4: Delete the bucket
+      // Delete bucket
       const deleteBucketCommand = new DeleteBucketCommand({
         Bucket: bucketName,
       });
 
       await this.s3.send(deleteBucketCommand);
       this.logger.log(`Bucket ${bucketName} deleted successfully.`);
-    } catch (error: any) {
-      this.logger.error(
-        `Failed to delete bucket ${bucketName}: ${error.message}`,
-      );
+    } catch (error) {
+      this.logger.error(`Failed to delete bucket ${bucketName}: ${getErrorMessage(error)}`);
       throw new Error('Bucket deletion failed');
     }
   }
 
-  // Generate presigned URL for upload (single)
-  async generatePresignedUrlForUpload(
-    fileName: string,
-    contentType: string,
-  ): Promise<string> {
+  async generatePresignedUrlForUpload(fileName: string, contentType: string): Promise<string> {
     const command = new PutObjectCommand({
       Bucket: process.env.S3_BUCKET_NAME,
       Key: fileName,
       ContentType: contentType,
-      // ACL: 'public-read',
     });
 
     try {
-      const url = await getSignedUrl(this.s3, command, { expiresIn: 3600 });
-      return url;
-    } catch (error: any) {
-      this.logger.error(`Failed to generate presigned URL: ${error.message}`);
+      return await getSignedUrl(this.s3, command, { expiresIn: 3600 });
+    } catch (error) {
+      this.logger.error(`Failed to generate presigned URL: ${getErrorMessage(error)}`);
       throw new Error('Failed to generate presigned URL');
     }
   }
 
-  // Generate presigned URLs for multiple uploads
   async generateMultiplePresignedUrlsForUpload(
     files: { fileName: string; contentType: string }[],
   ): Promise<string[]> {
@@ -303,18 +290,15 @@ export class DatahubService {
     return Promise.all(tasks);
   }
 
-  // Method to generate a pre-signed GET URL (with cache)
   async generateGetPresignedUrl(fileName: string): Promise<string> {
     const cacheKey = `presigned-url:${fileName}`;
 
-    // 1. Try to get from cache
     const cachedUrl = await this.cacheManager.get<string>(cacheKey);
     if (cachedUrl) {
-      console.log('from cache');
+      this.logger.log(`Get presigned URL cache hit for ${fileName}`);
       return cachedUrl;
     }
 
-    // 2. Generate if not in cache
     const command = new GetObjectCommand({
       Bucket: process.env.S3_BUCKET_NAME,
       Key: fileName,
@@ -327,12 +311,11 @@ export class DatahubService {
         'cdn.fotosfolio.com/',
       );
 
-      // 3. Store in Redis cache
-      await this.cacheManager.set(cacheKey, modifiedUrl, 3600); // Set TTL = 1 hour
+      await this.cacheManager.set(cacheKey, modifiedUrl, 3600);
 
       return modifiedUrl;
-    } catch (error: any) {
-      throw new Error(`Failed to generate pre-signed URL: ${error.message}`);
+    } catch (error) {
+      throw new Error(`Failed to generate pre-signed URL: ${getErrorMessage(error)}`);
     }
   }
 }

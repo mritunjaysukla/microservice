@@ -35,7 +35,7 @@ interface ZipResult {
   chunkIndex?: number;
 }
 
-export default async function enhancedZipTask(params: ZipTaskParams): Promise<ZipResult> {
+async function enhancedZipTask(params: ZipTaskParams): Promise<ZipResult> {
   const {
     files,
     s3Config,
@@ -82,7 +82,7 @@ export default async function enhancedZipTask(params: ZipTaskParams): Promise<Zi
         try {
           fs.unlinkSync(tempPath);
         } catch (error) {
-          console.warn(`[${jobId}] Cleanup failed:`, error.message);
+          console.warn(`[${jobId}] Cleanup failed:`, error);
         }
       }
     };
@@ -131,7 +131,7 @@ export default async function enhancedZipTask(params: ZipTaskParams): Promise<Zi
 
     archive.on('warning', (err) => {
       if (err.code === 'ENOENT') {
-        console.warn(`[${jobId}] Warning:`, err.message);
+        console.warn(`[${jobId}] Warning:`, err);
       } else {
         console.error(`[${jobId}] Archive critical warning:`, err);
         cleanup();
@@ -185,7 +185,7 @@ export default async function enhancedZipTask(params: ZipTaskParams): Promise<Zi
           } catch (error) {
             attempt++;
             if (attempt >= retries) {
-              console.error(`[${jobId}] File ${index + 1} failed after ${retries} attempts:`, error.message);
+              console.error(`[${jobId}] File ${index + 1} failed after ${retries} attempts:`, error);
             } else {
               await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
             }
@@ -274,4 +274,5 @@ function formatFileSize(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
-module.exports = enhancedZipTask;
+// Use ES6 export instead of CommonJS
+export default enhancedZipTask;

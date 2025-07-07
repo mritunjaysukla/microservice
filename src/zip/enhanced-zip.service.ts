@@ -24,13 +24,13 @@ import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { Readable } from 'stream';
 
-interface FileMetadata {
-  key: string;
-  size: number;
-  originalName?: string;
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  if (error && typeof error === 'object' && 'message' in error) return String((error as any).message);
+  return 'Unknown error occurred';
 }
 
-// Helper: Convert AWS SDK v3 ReadableStream (WHATWG) to Node.js Readable stream
 function toNodeReadable(readableStream: ReadableStream<Uint8Array>): Readable {
   const reader = readableStream.getReader();
 
@@ -67,8 +67,8 @@ export class EnhancedZipService {
       region: process.env.S3_REGION,
       endpoint: process.env.S3_ENDPOINT,
       credentials: {
-        accessKeyId: process.env.S3_ACCESS_KEY,
-        secretAccessKey: process.env.S3_SECRET_KEY,
+        accessKeyId: process.env.S3_ACCESS_KEY!,
+        secretAccessKey: process.env.S3_SECRET_KEY!,
       },
       forcePathStyle: true,
     });
@@ -83,7 +83,9 @@ export class EnhancedZipService {
   }
 
   async archiveAndStreamZip(dto: ZipRequestDto, res: Response, userId: string) {
-    if (!userId) throw new UnauthorizedException('User not authenticated');
+    if (!userId) {
+      throw new UnauthorizedException('User not authenticated');
+    }
 
     const { fileUrls, zipFileName } = dto;
     if (!fileUrls || fileUrls.length === 0) {
@@ -117,7 +119,7 @@ export class EnhancedZipService {
         );
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = getErrorMessage(error);
       this.logger.error(`Error in archiveAndStreamZip: ${message}`);
       if (!res.headersSent) {
         res.status(500).json({ error: 'Failed to process zip request', message });
@@ -125,8 +127,8 @@ export class EnhancedZipService {
     }
   }
 
-  private async getFilesMetadata(fileUrls: string[]): Promise<FileMetadata[]> {
-    const results: FileMetadata[] = [];
+  private async getFilesMetadata(fileUrls: string[]) {
+    const results = [];
     for (const url of fileUrls) {
       try {
         const key = this.extractKeyFromUrl(url);
@@ -141,37 +143,35 @@ export class EnhancedZipService {
           size: head.ContentLength || 0,
           originalName: path.basename(key),
         });
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        this.logger.warn(`Failed to get metadata for ${url}: ${msg}`);
+      } catch (error) {
+        const message = getErrorMessage(error);
+        this.logger.warn(`Failed to get metadata for ${url}: ${message}`);
       }
     }
     return results;
   }
 
-  private extractKeyFromUrl(url: string): string {
+  private extractKeyFromUrl(url: string) {
     const parts = url.split('/');
     return parts.slice(4).join('/');
   }
 
-  private async zipAndStream(
-    files: FileMetadata[],
-    zipFileName: string,
-    res: Response,
-    jobId: string,
-  ) {
+  private async zipAndStream(files: any[], zipFileName: string, res: Response, jobId: string) {
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="${zipFileName || 'archive.zip'}"`,
-    );
+    res.setHeader('Content-Disposition', `attachment; filename="${zipFileName || 'archive.zip'}"`);
+
     const archive = archiver.default('zip', { zlib: { level: 1 } });
+
     archive.on('error', (err) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.logger.error(`Archive error: ${msg}`);
-      if (!res.headersSent) res.status(500).send('Archive error');
+      const message = getErrorMessage(err);
+      this.logger.error(`Archive error: ${message}`);
+      if (!res.headersSent) {
+        res.status(500).send('Archive error');
+      }
     });
+
     archive.pipe(res);
+
     for (const file of files) {
       try {
         const s3Obj = await this.s3.send(
@@ -180,30 +180,23 @@ export class EnhancedZipService {
             Key: file.key,
           }),
         );
-        // Convert to Node.js Readable stream before appending:
         const nodeStream = toNodeReadable(s3Obj.Body as ReadableStream<Uint8Array>);
         archive.append(nodeStream, {
           name: file.originalName || path.basename(file.key),
         });
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        this.logger.warn(`Failed to append file ${file.key}: ${msg}`);
+      } catch (error) {
+        const message = getErrorMessage(error);
+        this.logger.warn(`Failed to append file ${file.key}: ${message}`);
       }
     }
+
     await archive.finalize();
     this.logger.log(`Zip streamed for job ${jobId}`);
   }
 
-  private async zipInChunksAndUpload(
-    files: FileMetadata[],
-    zipFileName: string,
-    res: Response,
-    jobId: string,
-    userId: string,
-    cacheKey: string,
-  ) {
+  private async zipInChunksAndUpload(files: any[], zipFileName: string, res: Response, jobId: string, userId: string, cacheKey: string) {
     const CHUNK_SIZE = 20;
-    const chunks: FileMetadata[][] = [];
+    const chunks: any[][] = [];
     for (let i = 0; i < files.length; i += CHUNK_SIZE) {
       chunks.push(files.slice(i, i + CHUNK_SIZE));
     }
@@ -232,10 +225,12 @@ export class EnhancedZipService {
       res.json({ downloadUrl: presignedUrl });
 
       for (const p of tempZipPaths.concat([finalZipPath])) {
-        if (fs.existsSync(p)) fs.unlinkSync(p);
+        if (fs.existsSync(p)) {
+          fs.unlinkSync(p);
+        }
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = getErrorMessage(error);
       this.logger.error(`Error in zipInChunksAndUpload: ${message}`);
       if (!res.headersSent) {
         res.status(500).json({ error: 'Failed to create large zip', message });
@@ -243,17 +238,17 @@ export class EnhancedZipService {
     }
   }
 
-  private async createChunkZip(files: FileMetadata[], zipName: string): Promise<string> {
+  private async createChunkZip(files: any[], zipName: string): Promise<string> {
     return new Promise(async (resolve, reject) => {
       const tempPath = path.join(this.tempDir, zipName);
       const output = fs.createWriteStream(tempPath);
       const archive = archiver.default('zip', { zlib: { level: 1 } });
+
       output.on('close', () => resolve(tempPath));
-      archive.on('error', (err) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        reject(new Error(msg));
-      });
+      archive.on('error', (err) => reject(new Error(getErrorMessage(err))));
+
       archive.pipe(output);
+
       for (const file of files) {
         try {
           const s3Obj = await this.s3.send(
@@ -266,11 +261,11 @@ export class EnhancedZipService {
           archive.append(nodeStream, {
             name: file.originalName || path.basename(file.key),
           });
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          this.logger.warn(`Failed to append file ${file.key} in chunk zip: ${msg}`);
+        } catch (error) {
+          this.logger.warn(`Failed to append file ${file.key} in chunk zip: ${getErrorMessage(error)}`);
         }
       }
+
       archive.finalize();
     });
   }
@@ -279,15 +274,16 @@ export class EnhancedZipService {
     return new Promise((resolve, reject) => {
       const output = fs.createWriteStream(finalZipPath);
       const archive = archiver.default('zip', { zlib: { level: 1 } });
+
       output.on('close', () => resolve(true));
-      archive.on('error', (err) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        reject(new Error(msg));
-      });
+      archive.on('error', (err) => reject(new Error(getErrorMessage(err))));
+
       archive.pipe(output);
+
       zipPaths.forEach((zipPath) => {
         archive.append(fs.createReadStream(zipPath), { name: path.basename(zipPath) });
       });
+
       archive.finalize();
     });
   }
@@ -304,8 +300,7 @@ export class EnhancedZipService {
         }),
       );
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(`Upload to S3 failed: ${message}`);
+      this.logger.error(`Upload to S3 failed: ${getErrorMessage(error)}`);
       throw new Error('Upload to S3 failed');
     }
   }
