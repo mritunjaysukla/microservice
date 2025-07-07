@@ -1,7 +1,7 @@
 # Optimized Zip Microservice
 
 ## Overview
-This optimized zip service combines the simplicity of your original single-endpoint approach with the performance benefits of worker threads. It streams zip files directly to the client without intermediate storage or job tracking.
+This optimized zip service provides a single API endpoint to create and download zip files, leveraging worker threads for performance and streaming files directly to the client without intermediate storage or job tracking. It is fully integrated with AWS S3 (using AWS SDK v3) and supports efficient memory usage for large files.
 
 ## Features
 - 🚀 **Single Endpoint**: One API call to create and download zip files
@@ -10,6 +10,7 @@ This optimized zip service combines the simplicity of your original single-endpo
 - 🔄 **Automatic Retry**: Built-in retry mechanism for failed downloads
 - 🔧 **File Type Conversion**: Automatic HEIC→JPG, MOV→MP4 conversion
 - 🎯 **Memory Optimized**: Efficient streaming for large files
+- ☁️ **AWS S3 v3**: Uses AWS SDK for JavaScript (v3) for all S3 operations
 
 ## API Usage
 
@@ -20,8 +21,8 @@ Content-Type: application/json
 
 {
   "fileUrls": [
-    "https://cdn.fotosfolio.com/fotosfolioUser_f301238a-4df1-4047-bae3-7df9e7602a35/_67812103-a6f5-4d15-9c78-a895309735c1/sandesh_75554b06-7c51-4867-962b-e7db11cbe4e2/DSC03213_1749762059613.jpg?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=MNU4IM4TB6W2F3N2EX9C%2F20250704%2Fap-south-1%2Fs3%2Faws4_request&X-Amz-Date=20250704T061719Z&X-Amz-Expires=3600&X-Amz-Signature=fcd2ffd998c8174f821ff2d216710994baad8d8058ecacd22a3d94d456d9db0e&X-Amz-SignedHeaders=host",
-    "https://cdn.fotosfolio.com/fotosfolioUser_f301238a-4df1-4047-bae3-7df9e7602a35/_67812103-a6f5-4d15-9c78-a895309735c1/sandesh_75554b06-7c51-4867-962b-e7db11cbe4e2/DSC03213_1749762059613_1750327135333_1750327363417.jpg?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=MNU4IM4TB6W2F3N2EX9C%2F20250704%2Fap-south-1%2Fs3%2Faws4_request&X-Amz-Date=20250704T061719Z&X-Amz-Expires=3600&X-Amz-Signature=024afaccc03a44f2b9ca2616cc86098d745c38214f5026a41ac4137ca0421b71&X-Amz-SignedHeaders=host"
+    "https://cdn.fotosfolio.com/fotosfolioUser_xxx/yyy/zzz/photo1.jpg?X-Amz-Algorithm=AWS4-HMAC-SHA256&...",
+    "https://cdn.fotosfolio.com/fotosfolioUser_xxx/yyy/zzz/photo2.jpg?X-Amz-Algorithm=AWS4-HMAC-SHA256&..."
   ],
   "zipFileName": "my-archive.zip"
 }
@@ -50,8 +51,8 @@ const response = await fetch('/zip', {
   },
   body: JSON.stringify({
     fileUrls: [
-      'https://example.com/photo1.jpg',
-      'https://example.com/photo2.jpg'
+      'https://cdn.fotosfolio.com/fotosfolioUser_xxx/yyy/zzz/photo1.jpg?X-Amz-Algorithm=AWS4-HMAC-SHA256&...',
+      'https://cdn.fotosfolio.com/fotosfolioUser_xxx/yyy/zzz/photo2.jpg?X-Amz-Algorithm=AWS4-HMAC-SHA256&...'
     ],
     zipFileName: 'my-photos.zip'
   })
@@ -72,8 +73,8 @@ curl -X POST http://localhost:3000/zip \
   -H "Content-Type: application/json" \
   -d '{
     "fileUrls": [
-      "https://example.com/photo1.jpg",
-      "https://example.com/photo2.jpg"
+      "https://cdn.fotosfolio.com/fotosfolioUser_xxx/yyy/zzz/photo1.jpg?X-Amz-Algorithm=AWS4-HMAC-SHA256&...",
+      "https://cdn.fotosfolio.com/fotosfolioUser_xxx/yyy/zzz/photo2.jpg?X-Amz-Algorithm=AWS4-HMAC-SHA256&..."
     ],
     "zipFileName": "my-photos.zip"
   }' \
@@ -89,10 +90,11 @@ REDIS_HOST=localhost
 REDIS_PORT=6379
 
 # S3 Configuration (for source files)
-S3_REGION=custom-region
-S3_ENDPOINT=https://your-s3-endpoint.com
+S3_REGION=ap-south-1
+S3_ENDPOINT=https://s3.ap-south-1.amazonaws.com
 S3_ACCESS_KEY=your-access-key
 S3_SECRET_KEY=your-secret-key
+S3_BUCKET_NAME=your-bucket-name
 
 # Worker Thread Configuration
 ZIP_MAX_THREADS=4    # Maximum worker threads
@@ -124,7 +126,7 @@ ZIP_MIN_THREADS=2    # Minimum worker threads
 Client Request → Controller → Service → Worker Thread Pool → Direct Stream Response
                                     ↓
                                Background Processing:
-                               - Download files in parallel
+                               - Download files in parallel (from S3 or CDN)
                                - Create ZIP archive
                                - Stream to client
 ```
@@ -142,4 +144,4 @@ Client Request → Controller → Service → Worker Thread Pool → Direct Stre
 3. No S3 storage required
 4. Immediate download start
 
-This optimized approach gives you the best of both worlds: the simplicity of your original implementation with the performance benefits of worker threads.
+This optimized approach gives you the best of both worlds: the simplicity of your original implementation with the performance benefits of worker threads and AWS S3 v3
