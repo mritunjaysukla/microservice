@@ -16,20 +16,35 @@ exports.ZipController = void 0;
 const common_1 = require("@nestjs/common");
 const enhanced_zip_service_1 = require("./enhanced-zip.service");
 const zip_request_dto_1 = require("./dto/zip-request.dto");
+const passport_1 = require("@nestjs/passport");
 let ZipController = class ZipController {
     constructor(zipService) {
         this.zipService = zipService;
     }
     async createZip(zipRequest, res, req) {
-        return this.zipService.archiveAndStreamZip(zipRequest, res, req.user.id);
+        try {
+            if (!req.user?.id) {
+                return res
+                    .status(common_1.HttpStatus.UNAUTHORIZED)
+                    .json({ error: 'Unauthorized' });
+            }
+            await this.zipService.archiveAndStreamZip(zipRequest, res, req.user.id);
+        }
+        catch (error) {
+            res.status(common_1.HttpStatus.INTERNAL_SERVER_ERROR).json({
+                error: 'Unhandled controller error',
+                message: error?.message || error,
+            });
+        }
     }
 };
 exports.ZipController = ZipController;
 __decorate([
     (0, common_1.Post)(),
+    (0, common_1.UseGuards)((0, passport_1.AuthGuard)('jwt')),
     __param(0, (0, common_1.Body)()),
     __param(1, (0, common_1.Res)()),
-    __param(2, (0, common_1.Request)()),
+    __param(2, (0, common_1.Req)()),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [zip_request_dto_1.ZipRequestDto, Object, Object]),
     __metadata("design:returntype", Promise)

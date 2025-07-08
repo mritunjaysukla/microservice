@@ -23,12 +23,21 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { Readable } from 'stream';
+import pLimit from 'p-limit';
+
 
 function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
+  if (
+    error &&
+    typeof error === 'object' &&
+    typeof (error as any).message === 'string'
+  ) {
+    return (error as any).message;
+  }
+
   if (typeof error === 'string') return error;
-  if (error && typeof error === 'object' && 'message' in error) return String((error as any).message);
-  return 'Unknown error occurred';
+
+  return JSON.stringify(error, null, 2); // serialize object instead of returning generic message
 }
 
 function toNodeReadable(readableStream: ReadableStream<Uint8Array>): Readable {
@@ -57,6 +66,11 @@ export class EnhancedZipService {
   private readonly redis: Redis;
   private readonly tempDir: string;
 
+  // Configurable concurrency and chunk size
+  private readonly CONCURRENCY = parseInt(process.env.ZIP_CONCURRENCY || '5');
+  private readonly CHUNK_SIZE = parseInt(process.env.ZIP_CHUNK_SIZE || '20');
+  private readonly SMALL_SIZE = 200 * 1024 * 1024; // 200MB
+
   constructor(
     private readonly configService: ConfigService,
     @Inject(forwardRef(() => DatahubService))
@@ -83,9 +97,7 @@ export class EnhancedZipService {
   }
 
   async archiveAndStreamZip(dto: ZipRequestDto, res: Response, userId: string) {
-    if (!userId) {
-      throw new UnauthorizedException('User not authenticated');
-    }
+
 
     const { fileUrls, zipFileName } = dto;
     if (!fileUrls || fileUrls.length === 0) {
@@ -93,20 +105,31 @@ export class EnhancedZipService {
     }
     const jobId = `zip-${uuidv4()}`;
     const cacheKey = `zip:${userId}:${jobId}`;
+    const metaCacheKey = `zip:meta:${userId}:${jobId}`;
 
     try {
-      const files = await this.getFilesMetadata(fileUrls);
+      // Try to get cached metadata
+      let files: any[] | null = null;
+      const cachedMeta = await this.redis.get(metaCacheKey);
+      if (cachedMeta) {
+        files = JSON.parse(cachedMeta);
+        this.logger.log(`File metadata cache hit for job ${jobId}`);
+      } else {
+        files = await this.getFilesMetadata(fileUrls);
+        await this.redis.set(metaCacheKey, JSON.stringify(files), 'EX', 60 * 60);
+      }
+
       const totalSize = files.reduce((sum, file) => sum + file.size, 0);
 
+      // Try to get cached presigned URL
       const cacheResult = await this.redis.get(cacheKey);
       if (cacheResult) {
-        this.logger.log(`Cache hit for job ${jobId}`);
+        this.logger.log(`Presigned URL cache hit for job ${jobId}`);
         res.redirect(cacheResult);
         return;
       }
 
-      const SMALL_SIZE = 200 * 1024 * 1024; // 200MB threshold
-      if (totalSize <= SMALL_SIZE) {
+      if (totalSize <= this.SMALL_SIZE) {
         await this.zipAndStream(files, zipFileName, res, jobId);
       } else {
         await this.zipInChunksAndUpload(
@@ -121,32 +144,45 @@ export class EnhancedZipService {
     } catch (error) {
       const message = getErrorMessage(error);
       this.logger.error(`Error in archiveAndStreamZip: ${message}`);
+
       if (!res.headersSent) {
         res.status(500).json({ error: 'Failed to process zip request', message });
       }
+
+      // ⚠️ Do NOT throw here — NestJS's ExceptionsHandler is causing the problem.
+      // Just return to exit cleanly.
+      return;
     }
   }
 
   private async getFilesMetadata(fileUrls: string[]) {
     const results = [];
-    for (const url of fileUrls) {
-      try {
-        const key = this.extractKeyFromUrl(url);
-        const head = await this.s3.send(
-          new HeadObjectCommand({
-            Bucket: process.env.S3_BUCKET_NAME!,
-            Key: key,
-          }),
-        );
-        results.push({
-          key,
-          size: head.ContentLength || 0,
-          originalName: path.basename(key),
-        });
-      } catch (error) {
-        const message = getErrorMessage(error);
-        this.logger.warn(`Failed to get metadata for ${url}: ${message}`);
-      }
+    const limit = pLimit(this.CONCURRENCY);
+    await Promise.all(
+      fileUrls.map(url =>
+        limit(async () => {
+          try {
+            const key = this.extractKeyFromUrl(url);
+            const head = await this.s3.send(
+              new HeadObjectCommand({
+                Bucket: process.env.S3_BUCKET_NAME!,
+                Key: key,
+              }),
+            );
+            results.push({
+              key,
+              size: head.ContentLength || 0,
+              originalName: path.basename(key),
+            });
+          } catch (error) {
+            const message = getErrorMessage(error);
+            this.logger.warn(`Failed to get metadata for ${url}: ${message}`);
+          }
+        })
+      )
+    );
+    if (results.length === 0) {
+      throw new Error('No valid files found for zipping');
     }
     return results;
   }
@@ -172,36 +208,42 @@ export class EnhancedZipService {
 
     archive.pipe(res);
 
-    for (const file of files) {
-      try {
-        const s3Obj = await this.s3.send(
-          new GetObjectCommand({
-            Bucket: process.env.S3_BUCKET_NAME!,
-            Key: file.key,
-          }),
-        );
-        const nodeStream = toNodeReadable(s3Obj.Body as ReadableStream<Uint8Array>);
-        archive.append(nodeStream, {
-          name: file.originalName || path.basename(file.key),
-        });
-      } catch (error) {
-        const message = getErrorMessage(error);
-        this.logger.warn(`Failed to append file ${file.key}: ${message}`);
-      }
-    }
+    const limit = pLimit(this.CONCURRENCY);
+
+    await Promise.all(
+      files.map(file =>
+        limit(async () => {
+          try {
+            const s3Obj = await this.s3.send(
+              new GetObjectCommand({
+                Bucket: process.env.S3_BUCKET_NAME!,
+                Key: file.key,
+              }),
+            );
+            const nodeStream = toNodeReadable(s3Obj.Body as ReadableStream<Uint8Array>);
+            archive.append(nodeStream, {
+              name: file.originalName || path.basename(file.key),
+            });
+          } catch (error) {
+            const message = getErrorMessage(error);
+            this.logger.warn(`Failed to append file ${file.key}: ${message}`);
+          }
+        })
+      )
+    );
 
     await archive.finalize();
     this.logger.log(`Zip streamed for job ${jobId}`);
   }
 
   private async zipInChunksAndUpload(files: any[], zipFileName: string, res: Response, jobId: string, userId: string, cacheKey: string) {
-    const CHUNK_SIZE = 20;
     const chunks: any[][] = [];
-    for (let i = 0; i < files.length; i += CHUNK_SIZE) {
-      chunks.push(files.slice(i, i + CHUNK_SIZE));
+    for (let i = 0; i < files.length; i += this.CHUNK_SIZE) {
+      chunks.push(files.slice(i, i + this.CHUNK_SIZE));
     }
 
     try {
+      // Parallelize chunk zipping
       const tempZipPaths: string[] = await Promise.all(
         chunks.map((chunk, idx) => this.createChunkZip(chunk, `${jobId}-chunk${idx}.zip`)),
       );
@@ -245,26 +287,37 @@ export class EnhancedZipService {
       const archive = archiver.default('zip', { zlib: { level: 1 } });
 
       output.on('close', () => resolve(tempPath));
-      archive.on('error', (err) => reject(new Error(getErrorMessage(err))));
+      archive.on('error', (err) => {
+        const message = getErrorMessage(err);
+        const safeError = new Error(message);
+        reject(safeError);
+      });
+
 
       archive.pipe(output);
 
-      for (const file of files) {
-        try {
-          const s3Obj = await this.s3.send(
-            new GetObjectCommand({
-              Bucket: process.env.S3_BUCKET_NAME!,
-              Key: file.key,
-            }),
-          );
-          const nodeStream = toNodeReadable(s3Obj.Body as ReadableStream<Uint8Array>);
-          archive.append(nodeStream, {
-            name: file.originalName || path.basename(file.key),
-          });
-        } catch (error) {
-          this.logger.warn(`Failed to append file ${file.key} in chunk zip: ${getErrorMessage(error)}`);
-        }
-      }
+      const limit = pLimit(this.CONCURRENCY);
+
+      await Promise.all(
+        files.map(file =>
+          limit(async () => {
+            try {
+              const s3Obj = await this.s3.send(
+                new GetObjectCommand({
+                  Bucket: process.env.S3_BUCKET_NAME!,
+                  Key: file.key,
+                }),
+              );
+              const nodeStream = toNodeReadable(s3Obj.Body as ReadableStream<Uint8Array>);
+              archive.append(nodeStream, {
+                name: file.originalName || path.basename(file.key),
+              });
+            } catch (error) {
+              this.logger.warn(`Failed to append file ${file.key} in chunk zip: ${getErrorMessage(error)}`);
+            }
+          })
+        )
+      );
 
       archive.finalize();
     });
@@ -300,8 +353,11 @@ export class EnhancedZipService {
         }),
       );
     } catch (error) {
-      this.logger.error(`Upload to S3 failed: ${getErrorMessage(error)}`);
-      throw new Error('Upload to S3 failed');
+      const message = getErrorMessage(error);
+      this.logger.error(`Upload to S3 failed: ${message}`);
+      const safeError = new Error(message || 'Upload to S3 failed');
+      throw safeError;
+
     }
   }
 }
