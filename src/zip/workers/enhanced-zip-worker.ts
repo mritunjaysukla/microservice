@@ -1,278 +1,182 @@
+import { parentPort, workerData } from 'worker_threads';
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import archiver from 'archiver';
 import * as fs from 'fs';
-import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
-import { createWriteStream } from 'fs';
-import { Readable } from 'stream';
-import { v4 as uuidv4 } from 'uuid';
 import * as path from 'path';
+import { Readable } from 'stream';
 import pLimit from 'p-limit';
 
-interface ZipTaskParams {
-  files: {
-    key: string;
-    size: number;
-    originalName?: string;
-  }[];
+interface WorkerData {
+  files: any[];
+  tempZipPath: string;
   s3Config: {
     region: string;
     endpoint: string;
-    accessKey: string;
-    secretKey: string;
-    bucket: string;
+    credentials: {
+      accessKeyId: string;
+      secretAccessKey: string;
+    };
   };
-  zipFileName?: string;
+  bucketName: string;
   jobId: string;
-  chunkIndex?: number;
-  totalChunks?: number;
   maxConcurrentDownloads: number;
 }
 
-interface ZipResult {
-  filePath: string;
-  fileSize: number;
-  successCount: number;
-  totalCount: number;
-  chunkIndex?: number;
+function toNodeReadable(readableStream: ReadableStream<Uint8Array>): Readable {
+  const reader = readableStream.getReader();
+  return new Readable({
+    async read() {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          this.push(null);
+        } else {
+          this.push(Buffer.from(value));
+        }
+      } catch (err) {
+        this.destroy(err);
+      }
+    },
+  });
 }
 
-async function enhancedZipTask(params: ZipTaskParams): Promise<ZipResult> {
-  const {
-    files,
-    s3Config,
-    zipFileName,
-    jobId,
-    chunkIndex,
-    totalChunks,
-    maxConcurrentDownloads,
-  } = params;
+async function enhancedZipTask(data: WorkerData): Promise<void> {
+  const { files, tempZipPath, s3Config, bucketName, jobId, maxConcurrentDownloads } = data;
 
-  const s3Client = new S3Client({
-    region: s3Config.region,
-    endpoint: s3Config.endpoint,
-    credentials: {
-      accessKeyId: s3Config.accessKey,
-      secretAccessKey: s3Config.secretKey,
-    },
-    forcePathStyle: true,
-  });
-
-  const startTime = Date.now();
-  console.log(`[${jobId}] Starting zip processing for ${files.length} files${chunkIndex !== undefined ? ` (chunk ${chunkIndex + 1}/${totalChunks})` : ''}`);
-
-  return new Promise(async (resolve, reject) => {
-    const fileName = zipFileName || `archive-${uuidv4()}.zip`;
-    const tempDir = path.resolve(__dirname, '../../../tmp');
-
-    if (!fs.existsSync(tempDir)) {
-      fs.mkdirSync(tempDir, { recursive: true });
-    }
-
-    const tempPath = path.join(tempDir, chunkIndex !== undefined ? `${chunkIndex}-${fileName}` : fileName);
-    const output = createWriteStream(tempPath);
-    let isCompleted = false;
-    let successCount = 0;
-
-    const archive = archiver('zip', {
-      zlib: { level: 0 }, // Fastest compression
-      forceLocalTime: true,
+  return new Promise<void>((resolve, reject) => {
+    const s3 = new S3Client({
+      region: s3Config.region,
+      endpoint: s3Config.endpoint,
+      credentials: s3Config.credentials,
+      forcePathStyle: true,
     });
 
+    const output = fs.createWriteStream(tempZipPath);
+    const archive = archiver('zip', { zlib: { level: 1 } });
+
+    let isCompleted = false;
+    let processedFiles = 0;
+
     const cleanup = () => {
-      if (fs.existsSync(tempPath)) {
-        try {
-          fs.unlinkSync(tempPath);
-        } catch (error) {
-          console.warn(`[${jobId}] Cleanup failed:`, error);
+      try {
+        if (fs.existsSync(tempZipPath)) {
+          fs.unlinkSync(tempZipPath);
         }
+      } catch (err) {
+        console.error(`[${jobId}] Cleanup error:`, err);
       }
     };
 
     output.on('close', () => {
       if (!isCompleted) {
         isCompleted = true;
-        try {
-          const stats = fs.statSync(tempPath);
-          const processingTime = Date.now() - startTime;
-
-          console.log(`[${jobId}] Zip created: ${tempPath} (${formatFileSize(stats.size)}) in ${(processingTime / 1000).toFixed(1)}s`);
-          console.log(`[${jobId}] Files: ${successCount}/${files.length} successful`);
-
-          resolve({
-            filePath: tempPath,
-            fileSize: stats.size,
-            successCount,
-            totalCount: files.length,
-            chunkIndex,
-          });
-        } catch (error) {
-          cleanup();
-          reject(error);
-        }
-      }
-    });
-
-    output.on('error', (err) => {
-      console.error(`[${jobId}] Output error:`, err);
-      cleanup();
-      if (!isCompleted) {
-        isCompleted = true;
-        reject(err);
+        console.log(`[${jobId}] Worker completed successfully. Processed ${processedFiles}/${files.length} files.`);
+        resolve();
       }
     });
 
     archive.on('error', (err) => {
-      console.error(`[${jobId}] Archive error:`, err);
       cleanup();
       if (!isCompleted) {
         isCompleted = true;
-        reject(err);
+        console.error(`[${jobId}] Archive error:`, err.message);
+        reject(new Error(`Archive error: ${err.message}`));
       }
     });
 
-    archive.on('warning', (err) => {
-      if (err.code === 'ENOENT') {
-        console.warn(`[${jobId}] Warning:`, err);
-      } else {
-        console.error(`[${jobId}] Archive critical warning:`, err);
-        cleanup();
-        if (!isCompleted) {
-          isCompleted = true;
-          reject(err);
-        }
+    output.on('error', (err) => {
+      cleanup();
+      if (!isCompleted) {
+        isCompleted = true;
+        console.error(`[${jobId}] Output stream error:`, err.message);
+        reject(new Error(`Output stream error: ${err.message}`));
       }
     });
 
     archive.pipe(output);
 
-    try {
-      const limit = pLimit(maxConcurrentDownloads);
-      const processFile = async (file: typeof files[0], index: number) => {
-        const retries = 2;
-        let attempt = 0;
+    const limit = pLimit(maxConcurrentDownloads);
+    const retries = 3;
 
-        while (attempt < retries) {
-          try {
-            const s3Obj = await s3Client.send(
-              new GetObjectCommand({
-                Bucket: s3Config.bucket,
-                Key: file.key,
-              })
-            );
-            const bodyStream = s3Obj.Body as Readable;
-            if (!bodyStream || typeof bodyStream.pipe !== 'function') {
-              throw new Error('Invalid S3 stream');
-            }
+    const processFile = async (file: typeof files[0], index: number) => {
+      let attempt = 0;
 
-            const fileName = normalizeFileName(file.originalName || path.basename(file.key), index);
+      while (attempt < retries) {
+        try {
+          console.log(`[${jobId}] Processing file ${index + 1}/${files.length}: ${file.key} (attempt ${attempt + 1})`);
 
-            await new Promise<void>((resolveFile, rejectFile) => {
-              archive.append(bodyStream, {
-                name: fileName,
-                date: new Date(),
-                size: file.size,
-              } as any);
+          const s3Obj = await s3.send(
+            new GetObjectCommand({
+              Bucket: bucketName,
+              Key: file.key,
+            })
+          );
 
-              bodyStream.once('end', () => resolveFile());
-              bodyStream.once('error', (err) => rejectFile(err));
+          const nodeStream = toNodeReadable(s3Obj.Body as ReadableStream<Uint8Array>);
+
+          archive.append(nodeStream, {
+            name: file.originalName || path.basename(file.key),
+          });
+
+          processedFiles++;
+          console.log(`[${jobId}] Successfully processed file ${index + 1}/${files.length}`);
+
+          // Send progress update to parent
+          if (parentPort) {
+            parentPort.postMessage({
+              type: 'progress',
+              processed: processedFiles,
+              total: files.length,
             });
+          }
 
-            successCount++;
-            if (successCount % 10 === 0 || successCount === files.length) {
-              console.log(`[${jobId}] Progress: ${successCount}/${files.length} files processed`);
-            }
+          break;
+        } catch (error) {
+          attempt++;
+          const properError = error instanceof Error ? error : new Error(String(error));
+          console.error(`[${jobId}] File processing error:`, properError.message);
 
-            return;
-          } catch (error) {
-            attempt++;
-            if (attempt >= retries) {
-              console.error(`[${jobId}] File ${index + 1} failed after ${retries} attempts:`, error);
-            } else {
-              await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
-            }
+          if (attempt >= retries) {
+            console.error(`[${jobId}] File ${index + 1} failed after ${retries} attempts:`, properError.message);
+          } else {
+            await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
           }
         }
-      };
+      }
+    };
 
-      await Promise.all(files.map((file, index) => limit(() => processFile(file, index))));
+    const processFiles = async () => {
+      try {
+        await Promise.all(files.map((file, index) => limit(() => processFile(file, index))));
 
-      if (successCount === 0) {
+        console.log(`[${jobId}] All files processed, finalizing archive...`);
+        archive.finalize();
+      } catch (err) {
+        const properError = err instanceof Error ? err : new Error(String(err));
+        console.error(`[${jobId}] Processing error:`, properError.message);
         cleanup();
         if (!isCompleted) {
           isCompleted = true;
-          reject(new Error('No files were successfully processed'));
-        }
-        return;
-      }
-
-      console.log(`[${jobId}] Processing complete: ${successCount}/${files.length} files`);
-      console.log(`[${jobId}] Finalizing archive...`);
-
-      const finalizeTimeout = setTimeout(() => {
-        if (!isCompleted) {
-          isCompleted = true;
-          console.error(`[${jobId}] Archive finalization timed out after 60 seconds`);
-          cleanup();
-          reject(new Error('Archive finalization timed out'));
-        }
-      }, 60000);
-
-      try {
-        await archive.finalize();
-        clearTimeout(finalizeTimeout);
-        console.log(`[${jobId}] Archive finalized successfully`);
-      } catch (finalizeError) {
-        clearTimeout(finalizeTimeout);
-        if (!isCompleted) {
-          isCompleted = true;
-          console.error(`[${jobId}] Finalization error:`, finalizeError);
-          cleanup();
-          reject(finalizeError);
+          reject(properError);
         }
       }
+    };
 
-    } catch (err) {
-      console.error(`[${jobId}] Processing error:`, err);
-      cleanup();
-      if (!isCompleted) {
-        isCompleted = true;
-        reject(err);
-      }
-    }
+    processFiles();
   });
 }
 
-function normalizeFileName(fileName: string, index: number): string {
-  fileName = fileName || `file-${index + 1}`;
-
-  if (fileName.toLowerCase().endsWith('.heic')) {
-    fileName = fileName.replace(/\.heic$/i, '.jpg');
-  }
-  if (fileName.toLowerCase().endsWith('.mov')) {
-    fileName = fileName.replace(/\.mov$/i, '.mp4');
-  }
-
-  fileName = fileName.replace(/[^\w\-_.]/g, '_');
-
-  if (fileName.length > 100) {
-    const ext = path.extname(fileName);
-    const base = path.basename(fileName, ext);
-    fileName = base.substring(0, 100 - ext.length) + ext;
-  }
-
-  if (!path.extname(fileName)) {
-    fileName += '.bin';
-  }
-
-  return `${String(index + 1).padStart(3, '0')}_${fileName}`;
+// Worker execution
+if (parentPort) {
+  enhancedZipTask(workerData)
+    .then(() => {
+      parentPort!.postMessage({ type: 'success' });
+    })
+    .catch((error) => {
+      const properError = error instanceof Error ? error : new Error(String(error));
+      parentPort!.postMessage({
+        type: 'error',
+        message: properError.message
+      });
+    });
 }
-
-function formatFileSize(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-}
-
-// Use ES6 export instead of CommonJS
-export default enhancedZipTask;

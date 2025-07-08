@@ -22,6 +22,8 @@ const common_1 = require("@nestjs/common");
 const p_limit_1 = __importDefault(require("p-limit"));
 const client_s3_1 = require("@aws-sdk/client-s3");
 const s3_request_presigner_1 = require("@aws-sdk/s3-request-presigner");
+const http_1 = require("http");
+const https_1 = require("https");
 function getErrorMessage(error) {
     if (error instanceof Error)
         return error.message;
@@ -36,6 +38,8 @@ let DatahubService = DatahubService_1 = class DatahubService {
         this.cacheManager = cacheManager;
         this.logger = new common_1.Logger(DatahubService_1.name);
         this.CONCURRENCY_LIMIT = 10;
+        const httpAgent = new http_1.Agent({ keepAlive: true, maxSockets: 50 });
+        const httpsAgent = new https_1.Agent({ keepAlive: true, maxSockets: 50 });
         this.s3 = new client_s3_1.S3Client({
             region: process.env.S3_REGION,
             endpoint: process.env.S3_ENDPOINT,
@@ -44,6 +48,10 @@ let DatahubService = DatahubService_1 = class DatahubService {
                 secretAccessKey: process.env.S3_SECRET_KEY,
             },
             forcePathStyle: true,
+            requestHandler: {
+                httpAgent,
+                httpsAgent
+            }
         });
     }
     async uploadFile(folderPath, file) {

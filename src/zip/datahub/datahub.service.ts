@@ -26,6 +26,8 @@ import {
   DeleteBucketCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { Agent as HttpAgent } from 'http';
+import { Agent as HttpsAgent } from 'https';
 
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -50,6 +52,10 @@ export class DatahubService {
   CONCURRENCY_LIMIT = 10;
 
   constructor(@Inject(CACHE_MANAGER) private readonly cacheManager: Cache) {
+    // Create S3 client with connection pooling
+    const httpAgent = new HttpAgent({ keepAlive: true, maxSockets: 50 });
+    const httpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 50 });
+
     this.s3 = new S3Client({
       region: process.env.S3_REGION,
       endpoint: process.env.S3_ENDPOINT,
@@ -58,6 +64,10 @@ export class DatahubService {
         secretAccessKey: process.env.S3_SECRET_KEY!,
       },
       forcePathStyle: true,
+      requestHandler: {
+        httpAgent,
+        httpsAgent
+      }
     });
   }
 

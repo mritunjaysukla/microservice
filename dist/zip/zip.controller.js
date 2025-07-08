@@ -11,45 +11,54 @@ var __metadata = (this && this.__metadata) || function (k, v) {
 var __param = (this && this.__param) || function (paramIndex, decorator) {
     return function (target, key) { decorator(target, key, paramIndex); }
 };
+var ZipController_1;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ZipController = void 0;
 const common_1 = require("@nestjs/common");
 const enhanced_zip_service_1 = require("./enhanced-zip.service");
 const zip_request_dto_1 = require("./dto/zip-request.dto");
-const passport_1 = require("@nestjs/passport");
-let ZipController = class ZipController {
+function ensureError(error) {
+    if (error instanceof Error)
+        return error;
+    if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string') {
+        return new Error(error.message);
+    }
+    if (typeof error === 'string')
+        return new Error(error);
+    return new Error(`Unknown error: ${JSON.stringify(error)}`);
+}
+let ZipController = ZipController_1 = class ZipController {
     constructor(zipService) {
         this.zipService = zipService;
+        this.logger = new common_1.Logger(ZipController_1.name);
     }
-    async createZip(zipRequest, res, req) {
+    async createZip(zipRequest, res) {
         try {
-            if (!req.user?.id) {
-                return res
-                    .status(common_1.HttpStatus.UNAUTHORIZED)
-                    .json({ error: 'Unauthorized' });
-            }
-            await this.zipService.archiveAndStreamZip(zipRequest, res, req.user.id);
+            const userId = 'default-user';
+            await this.zipService.archiveAndStreamZip(zipRequest, res, userId);
         }
         catch (error) {
-            res.status(common_1.HttpStatus.INTERNAL_SERVER_ERROR).json({
-                error: 'Unhandled controller error',
-                message: error?.message || error,
-            });
+            const safeError = ensureError(error);
+            this.logger.error(`Controller error: ${safeError.message}`, safeError.stack);
+            if (!res.headersSent) {
+                res.status(common_1.HttpStatus.INTERNAL_SERVER_ERROR).json({
+                    error: 'Unhandled controller error',
+                    message: safeError.message,
+                });
+            }
         }
     }
 };
 exports.ZipController = ZipController;
 __decorate([
     (0, common_1.Post)(),
-    (0, common_1.UseGuards)((0, passport_1.AuthGuard)('jwt')),
     __param(0, (0, common_1.Body)()),
     __param(1, (0, common_1.Res)()),
-    __param(2, (0, common_1.Req)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [zip_request_dto_1.ZipRequestDto, Object, Object]),
+    __metadata("design:paramtypes", [zip_request_dto_1.ZipRequestDto, Object]),
     __metadata("design:returntype", Promise)
 ], ZipController.prototype, "createZip", null);
-exports.ZipController = ZipController = __decorate([
+exports.ZipController = ZipController = ZipController_1 = __decorate([
     (0, common_1.Controller)('zip'),
     __metadata("design:paramtypes", [enhanced_zip_service_1.EnhancedZipService])
 ], ZipController);

@@ -38,6 +38,7 @@ const app_module_1 = require("./app.module");
 const swagger_1 = require("@nestjs/swagger");
 const common_1 = require("@nestjs/common");
 const bodyParser = __importStar(require("body-parser"));
+const all_exceptions_filter_1 = require("./common/filters/all-exceptions.filter");
 function getErrorMessage(error) {
     if (error instanceof Error)
         return error.message;
@@ -50,6 +51,7 @@ function getErrorMessage(error) {
 async function bootstrap() {
     const logger = new common_1.Logger('ZIP-Microservice');
     const app = await core_1.NestFactory.create(app_module_1.AppModule);
+    app.useGlobalFilters(new all_exceptions_filter_1.AllExceptionsFilter());
     app.use(bodyParser.json({ limit: '50mb' }));
     app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
     app.useGlobalPipes(new common_1.ValidationPipe());
@@ -60,8 +62,12 @@ async function bootstrap() {
         .build();
     const document = swagger_1.SwaggerModule.createDocument(app, config);
     swagger_1.SwaggerModule.setup('api-docs', app, document);
-    process.on('unhandledRejection', (reason, promise) => {
-        logger.error(`Unhandled Rejection at: ${promise} reason: ${getErrorMessage(reason)}`);
+    process.on('unhandledRejection', (reason) => {
+        const error = reason instanceof Error ? reason : new Error(String(reason));
+        logger.error(`Unhandled Rejection: ${error.message}`);
+        if (error.stack) {
+            logger.error(error.stack);
+        }
     });
     process.on('uncaughtException', (error) => {
         logger.error(`Uncaught Exception: ${getErrorMessage(error)}`);
