@@ -25,6 +25,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { Readable } from 'stream';
 import pLimit from 'p-limit';
 import { Worker } from 'worker_threads';
+import { cleanUpTempFiles } from './utils/temp-file-cleaner';
 
 // Enhanced error handling function
 function ensureError(error: unknown): Error {
@@ -79,8 +80,8 @@ export class EnhancedZipService {
     this.s3 = new S3Client({
       region: 'ap-south-1',
       credentials: {
-        accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
-        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+        accessKeyId: process.env.S3_ACCESS_KEY,
+        secretAccessKey: process.env.S3_SECRET_KEY,
       },
       forcePathStyle: true,
       maxAttempts: 3,
@@ -90,7 +91,7 @@ export class EnhancedZipService {
     this.redis = new Redis({
       host: process.env.REDIS_HOST || 'localhost',
       port: parseInt(process.env.REDIS_PORT || '6379'),
-      maxRetriesPerRequest: 3,
+      maxRetriesPerRequest: null,
       enableOfflineQueue: false,
     });
 
@@ -101,6 +102,21 @@ export class EnhancedZipService {
 
     // Set UV_THREADPOOL_SIZE for better performance
     process.env.UV_THREADPOOL_SIZE = (parseInt(process.env.UV_THREADPOOL_SIZE || '4') * 2).toString();
+
+    // Clear any existing cache on startup
+    this.clearStartupCache();
+  }
+
+  private async clearStartupCache(): Promise<void> {
+    try {
+      const keys = await this.redis.keys('zip:*');
+      if (keys.length > 0) {
+        await this.redis.del(...keys);
+        this.logger.log(`Cleared ${keys.length} cached zip keys on startup`);
+      }
+    } catch (error) {
+      this.logger.warn(`Failed to clear startup cache: ${error.message}`);
+    }
   }
 
   async archiveAndStreamZip(dto: ZipRequestDto, res: Response, userId: string): Promise<void> {
@@ -158,9 +174,6 @@ export class EnhancedZipService {
       if (totalSize <= this.SMALL_SIZE) {
         // Small files: Sequential processing with streaming
         await this.zipAndStreamSmall(files, zipFileName, res, jobId);
-      } else if (totalSize <= this.QUEUE_THRESHOLD) {
-        // Medium files: Parallel processing with worker threads
-        await this.zipLargeWithWorkers(files, zipFileName, res, jobId, userId, cacheKey);
       } else {
         // Large files: Use BullMQ for background processing
         await this.zipWithQueue(files, zipFileName, res, jobId, userId, cacheKey);
@@ -187,25 +200,86 @@ export class EnhancedZipService {
       fileUrls.map(url =>
         limit(async () => {
           try {
-            const key = this.extractKeyFromUrl(url);
-            const head = await this.s3.send(
-              new HeadObjectCommand({
-                Bucket: process.env.S3_BUCKET_NAME!,
-                Key: key,
-              }),
-            );
-            results.push({
-              key,
-              size: head.ContentLength || 0,
-              originalName: path.basename(key),
-            });
+            // Clean the URL and extract filename
+            const cleanUrl = url.split('?')[0]; // Remove query parameters for filename extraction
+            const urlObj = new URL(url);
+            const pathname = urlObj.pathname;
+            const originalName = pathname.split('/').pop() || 'unknown-file';
+
+            // Use fetch with timeout instead of S3 SDK
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+
+            try {
+              // Try HEAD request first
+              let response = await fetch(url, {
+                method: 'HEAD',
+                signal: controller.signal
+              });
+
+              // If HEAD fails, try GET with range
+              if (!response.ok && response.status !== 405) {
+                response = await fetch(url, {
+                  method: 'GET',
+                  headers: { 'Range': 'bytes=0-1' },
+                  signal: controller.signal
+                });
+              }
+
+              clearTimeout(timeoutId);
+
+              if (response.ok) {
+                let size = parseInt(response.headers.get('content-length') || '0', 10);
+
+                // Handle range response
+                const contentRange = response.headers.get('content-range');
+                if (contentRange) {
+                  const match = contentRange.match(/bytes \d+-\d+\/(\d+)/);
+                  if (match) {
+                    size = parseInt(match[1], 10);
+                  }
+                }
+
+                // Default size if we can't determine it
+                if (size === 0) {
+                  size = 1024 * 1024; // Default to 1MB
+                }
+
+                results.push({
+                  url, // Store the full URL
+                  size,
+                  originalName,
+                  key: pathname.substring(1) // Remove leading slash for compatibility
+                });
+
+              } else {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+              }
+            } catch (fetchError) {
+              clearTimeout(timeoutId);
+              throw fetchError;
+            }
           } catch (error) {
             const safeError = ensureError(error);
             this.logger.warn(`[${jobId}] Failed to get metadata for ${url}: ${safeError.message}`);
+
+            // Add a fallback entry with estimated size
+            const urlObj = new URL(url);
+            const originalName = urlObj.pathname.split('/').pop() || 'unknown-file';
+
+            results.push({
+              url,
+              size: 5 * 1024 * 1024, // Estimate 5MB for failed requests
+              originalName,
+              key: urlObj.pathname.substring(1),
+              isFallback: true
+            });
           }
         })
       )
     );
+
+    this.logger.log(`[${jobId}] Successfully processed ${results.length} files (${results.filter(r => !r.isFallback).length} with real metadata)`);
 
     if (results.length === 0) {
       throw new Error('No valid files found for zipping');
@@ -242,18 +316,20 @@ export class EnhancedZipService {
       // Sequential processing for small files
       for (const [index, file] of files.entries()) {
         try {
-          this.logger.log(`[${jobId}] Processing file ${index + 1}/${files.length}: ${file.key}`);
+          this.logger.log(`[${jobId}] Processing file ${index + 1}/${files.length}: ${file.originalName}`);
 
-          const s3Obj = await this.s3.send(
-            new GetObjectCommand({
-              Bucket: process.env.S3_BUCKET_NAME!,
-              Key: file.key,
-            }),
-          );
+          // Use fetch instead of S3 SDK
+          const response = await fetch(file.url);
 
-          const nodeStream = toNodeReadable(s3Obj.Body as ReadableStream<Uint8Array>);
+          if (!response.ok) {
+            throw new Error(`Failed to fetch ${file.originalName}: HTTP ${response.status}`);
+          }
+
+          // Convert web stream to Node.js readable stream
+          const nodeStream = Readable.fromWeb(response.body);
+
           archive.append(nodeStream, {
-            name: file.originalName || path.basename(file.key),
+            name: file.originalName,
           });
 
           if ((index + 1) % 10 === 0) {
@@ -261,7 +337,7 @@ export class EnhancedZipService {
           }
         } catch (error) {
           const safeError = ensureError(error);
-          this.logger.warn(`[${jobId}] Failed to append file ${file.key}: ${safeError.message}`);
+          this.logger.warn(`[${jobId}] Failed to append file ${file.originalName}: ${safeError.message}`);
         }
       }
 
@@ -277,95 +353,30 @@ export class EnhancedZipService {
     }
   }
 
-  // Medium files: Parallel processing with worker threads
-  private async zipLargeWithWorkers(files: any[], zipFileName: string, res: Response, jobId: string, userId: string, cacheKey: string): Promise<void> {
-    try {
-      // Split files into chunks for parallel processing
-      const chunks: any[][] = [];
-      for (let i = 0; i < files.length; i += this.CHUNK_SIZE) {
-        chunks.push(files.slice(i, i + this.CHUNK_SIZE));
-      }
 
-      this.logger.log(`[${jobId}] Processing ${chunks.length} chunks with worker threads`);
-
-      // Process chunks in parallel using worker threads
-      const tempZipPaths: string[] = await Promise.all(
-        chunks.map((chunk, idx) =>
-          this.createChunkZipWithWorker(chunk, `${jobId}-chunk${idx}.zip`, jobId)
-        )
-      );
-
-      // Merge all chunk zips into final zip
-      const finalZipPath = path.join(this.tempDir, `${jobId}-final.zip`);
-      await this.mergeZips(tempZipPaths, finalZipPath, jobId);
-
-      // Upload to S3
-      const s3Key = `zips/${userId}/${jobId}/${zipFileName || 'archive.zip'}`;
-      await this.uploadToS3(finalZipPath, s3Key, jobId);
-
-      // Generate presigned URL
-      const presignedUrl = await getSignedUrl(
-        this.s3,
-        new GetObjectCommand({
-          Bucket: process.env.S3_BUCKET_NAME!,
-          Key: s3Key,
-        }),
-        { expiresIn: 60 * 60 * 24 }, // 24 hours
-      );
-
-      // Cache the result
-      try {
-        await this.redis.set(cacheKey, presignedUrl, 'EX', 60 * 60 * 23); // Cache for 23 hours
-      } catch (cacheError) {
-        this.logger.warn(`[${jobId}] Cache write failed: ${ensureError(cacheError).message}`);
-      }
-
-      res.json({
-        downloadUrl: presignedUrl,
-        jobId,
-        totalFiles: files.length,
-        totalSize: files.reduce((sum, file) => sum + file.size, 0),
-      });
-
-      // Cleanup temp files
-      setTimeout(() => {
-        this.cleanupTempFiles([...tempZipPaths, finalZipPath], jobId);
-      }, 5000);
-
-    } catch (error) {
-      const safeError = ensureError(error);
-      this.logger.error(`[${jobId}] Error in zipLargeWithWorkers: ${safeError.message}`, safeError.stack);
-      if (!res.headersSent) {
-        res.status(500).json({
-          error: 'Failed to create large zip',
-          message: safeError.message,
-        });
-      }
-      return;
-    }
-  }
 
   // Large files: Use BullMQ for background processing
   private async zipWithQueue(files: any[], zipFileName: string, res: Response, jobId: string, userId: string, cacheKey: string): Promise<void> {
     try {
-      const s3Key = `zips/${userId}/${jobId}/${zipFileName || 'archive.zip'}`;
-
       // Add job to queue
-      await this.zipQueueService.addZipJob({
+      const queueJobId = await this.zipQueueService.addZipJob({
         files,
         zipFileName,
         userId,
         jobId,
-        s3Key,
+        s3Key: '', // Not needed for cache approach
       });
 
-      // Return job status endpoint
+      // Return job status and download info
       res.json({
         message: 'Zip processing started',
         jobId,
+        queueJobId,
         statusUrl: `/zip/status/${jobId}`,
+        downloadUrl: `/zip/download/${jobId}`,
         totalFiles: files.length,
         totalSize: files.reduce((sum, file) => sum + file.size, 0),
+        estimatedTime: 'Ready in 2-5 minutes'
       });
 
       this.logger.log(`[${jobId}] Large zip job queued successfully`);
@@ -382,102 +393,8 @@ export class EnhancedZipService {
     }
   }
 
-  private async createChunkZipWithWorker(files: any[], zipName: string, jobId: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const tempPath = path.join(this.tempDir, zipName);
-      const workerPath = path.join(__dirname, 'workers', 'enhanced-zip-worker.js');
 
-      const worker = new Worker(workerPath, {
-        workerData: {
-          files,
-          tempZipPath: tempPath,
-          s3Config: {
-            region: process.env.S3_REGION,
-            endpoint: process.env.S3_ENDPOINT,
-            credentials: {
-              accessKeyId: process.env.S3_ACCESS_KEY!,
-              secretAccessKey: process.env.S3_SECRET_KEY!,
-            },
-          },
-          bucketName: process.env.S3_BUCKET_NAME!,
-          jobId,
-          maxConcurrentDownloads: this.CONCURRENCY,
-        },
-      });
-
-      worker.on('message', (message) => {
-        if (message.type === 'success') {
-          resolve(tempPath);
-        } else if (message.type === 'error') {
-          reject(new Error(message.message));
-        } else if (message.type === 'progress') {
-          this.logger.log(`[${jobId}] Worker progress: ${message.processed}/${message.total}`);
-        }
-      });
-
-      worker.on('error', (error) => {
-        reject(ensureError(error));
-      });
-
-      worker.on('exit', (code) => {
-        if (code !== 0) {
-          reject(new Error(`Worker stopped with exit code ${code}`));
-        }
-      });
-    });
-  }
-
-  private async mergeZips(zipPaths: string[], finalZipPath: string, jobId: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const output = fs.createWriteStream(finalZipPath);
-      const archive = archiver('zip', { zlib: { level: 1 } });
-
-      output.on('close', () => {
-        this.logger.log(`[${jobId}] Merged zip created: ${this.formatFileSize(archive.pointer())}`);
-        resolve();
-      });
-
-      archive.on('error', (err) => {
-        reject(ensureError(err));
-      });
-
-      archive.pipe(output);
-
-      zipPaths.forEach((zipPath, index) => {
-        if (fs.existsSync(zipPath)) {
-          archive.append(fs.createReadStream(zipPath), { name: `chunk-${index}.zip` });
-        }
-      });
-
-      archive.finalize();
-    });
-  }
-
-  private async uploadToS3(filePath: string, key: string, jobId: string): Promise<void> {
-    try {
-      const fileStream = fs.createReadStream(filePath);
-      const fileStats = fs.statSync(filePath);
-
-      this.logger.log(`[${jobId}] Uploading ${this.formatFileSize(fileStats.size)} to S3`);
-
-      await this.s3.send(
-        new PutObjectCommand({
-          Bucket: process.env.S3_BUCKET_NAME!,
-          Key: key,
-          Body: fileStream,
-          ContentType: 'application/zip',
-        }),
-      );
-
-      this.logger.log(`[${jobId}] Upload to S3 completed`);
-    } catch (error) {
-      const safeError = ensureError(error);
-      this.logger.error(`[${jobId}] Upload to S3 failed: ${safeError.message}`);
-      throw safeError;
-    }
-  }
-
-  private cleanupTempFiles(filePaths: string[], jobId: string): void {
+  private cleanUpTempFiles(filePaths: string[], jobId: string): void {
     filePaths.forEach(filePath => {
       try {
         if (fs.existsSync(filePath)) {

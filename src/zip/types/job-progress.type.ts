@@ -1,4 +1,4 @@
-// src/zip/types/job-progress.type.ts
+
 
 export interface ZipJobProgress {
   jobId: string;
