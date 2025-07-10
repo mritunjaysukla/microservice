@@ -6,3 +6,4 @@ tsconfig.tsbuildinfo
 temp/zips
 generate-zip-json.sh
 zip-request-dto.json
+OPTIMIZED_ZIP_USAGE.md
