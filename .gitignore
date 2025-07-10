@@ -4,3 +4,5 @@ dist
 node_modules
 tsconfig.tsbuildinfo
 temp/zips
+generate-zip-json.sh
+zip-request-dto.json
